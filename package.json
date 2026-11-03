@@ -1,0 +1,26 @@
+{
+  "name": "@local/harnessmm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Guarded decision reuse prototype: EDG graphs, receipt guards, substitution certificates",
+  "exports": {
+    ".": "./index.js",
+    "./lib/*": "./lib/*",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib",
+    "bin",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

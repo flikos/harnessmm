@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="HarnessMM Lab">
+  <rect width="64" height="64" rx="14" fill="#101a2b"/>
+  <path d="M14 44 L26 30 L36 38 L50 20" fill="none" stroke="#4fd1c5" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="14" cy="44" r="5" fill="#4fd1c5"/>
+  <circle cx="26" cy="30" r="5" fill="#f6ad55"/>
+  <circle cx="36" cy="38" r="5" fill="#4fd1c5"/>
+  <circle cx="50" cy="20" r="6" fill="#f6ad55"/>
+  <path d="M14 12 h20" stroke="#8fa3bf" stroke-width="3" stroke-linecap="round"/>
+</svg>
