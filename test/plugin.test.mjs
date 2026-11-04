@@ -10,6 +10,8 @@ import { readUsage } from '../lib/usage.js'
 // throwaway directory so test runs never pollute the live usage.jsonl.
 const TEST_USAGE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'harnessmm-test-usage-'))
 process.env.HARNESSMM_USAGE_DIR = TEST_USAGE_DIR
+// The graph library defaults to ~/.harnessmm; tests must not write there.
+process.env.HARNESSMM_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'harnessmm-test-home-'))
 
 function fakeContext() {
   const defs = new Map()
@@ -27,7 +29,7 @@ function fakeContext() {
   }
 }
 
-test('the plugin registers exactly the two HarnessMM tools', () => {
+test('the plugin registers its tools', () => {
   const ctx = fakeContext()
   apply(ctx)
   assert.deepEqual([...ctx.defs.keys()].sort(), ['harnessmm_bench', 'harnessmm_chain', 'harnessmm_validate'])
@@ -138,4 +140,27 @@ test('harnessmm_chain refuses shell nodes without allowShell', async () => {
   })
   assert.equal(value.stopReason, 'error')
   assert.match(value.markdown, /allowShell/)
+})
+
+test('harnessmm_chain saves a graph, lists it, and runs it by name', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harnessmm-chain-tool-'))
+  const ctx = fakeContext()
+  apply(ctx)
+  const chain = ctx.defs.get('harnessmm_chain')
+
+  const saved = await chain.execute({
+    name: 'smoke-write',
+    save: true,
+    description: 'writes one file',
+    graph: { nodes: [{ id: 's1', action: 'write', args: { path: 'a.txt', content: 'hi' } }] },
+  })
+  assert.equal(saved.stopReason, 'saved')
+
+  const listed = await chain.execute({ list: true })
+  assert.match(listed.markdown, /smoke-write/)
+  assert.match(listed.markdown, /Usage \(last 200 calls\)/)
+
+  const run = await chain.execute({ name: 'smoke-write', cwd: dir })
+  assert.equal(run.stopReason, 'completed')
+  assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8'), 'hi')
 })

@@ -121,3 +121,19 @@ patterns where one authored graph serves several transitions.
 Bad fit: one- or two-step tasks (graph authorship does not amortise — break-even was 5 substituted
 callbacks in the measured run), steps that branch on the *content* of an observation, exploratory
 debugging, and anything where a guard's proven condition is weaker than the correctness you need.
+## Saved graphs, resume, and accounting
+
+- **Saved graphs.** `harnessmm_chain { graph, name, save: true }` validates the graph and stores it
+  under `name` in `~/.harnessmm/graphs/`. Run it later with `{ name }` — no re-authoring, no
+  re-validation, no model tokens spent on rebuilding the plan. `{ list: true }` shows saved graphs
+  and usage counters.
+- **Resume.** A stopped chain returns its `receipts`. Pass them back as `receipts` with a repaired
+  graph: finished nodes are not re-executed, and guards may reference them.
+- **Failure detail.** When a chain stops, the report includes the *full* output of the failing step
+  (up to 16 KB), not the 120-character table cell — that is what you need to fix the graph.
+- **Command safety.** `allowShell: true` is blanket consent, so the executor refuses a small
+  denylist (`sudo`, recursive delete of `/`, `mkfs`, `dd if=`, piping a download into a shell, fork
+  bombs, raw disk writes) and honours a per-node `timeoutMs`.
+- **Accounting.** Every run reports `saved: { avoidedCalls, estTokens, estMs }` and appends the same
+  numbers to the ledger. The ledger lives in `~/.harnessmm/usage/usage.jsonl` (the old temporary
+  ledger is migrated once), so "was this used, and did it help" survives a reboot.

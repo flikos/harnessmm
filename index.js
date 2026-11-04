@@ -6,6 +6,8 @@ import { TASKS } from './lib/tasks.js'
 import { runBenchmark, renderMarkdown, writeReport } from './lib/report.js'
 import { logUsage } from './lib/usage.js'
 import { runChain, makeExecutor, renderChain } from './lib/chain.js'
+import { saveGraph, loadGraph, listGraphs, isValidName } from './lib/library.js'
+import { summarizeUsage } from './lib/usage.js'
 
 /**
  * HarnessMM Lab: two tools.
@@ -155,17 +157,81 @@ async function resolveCwd(ctx, exec, explicit) {
   throw new Error('cannot resolve the session directory; pass cwd explicitly')
 }
 
+function renderList() {
+  const graphs = listGraphs()
+  const usage = summarizeUsage()
+  const lines = ['# HarnessMM state', '']
+  if (graphs.length === 0) {
+    lines.push('No saved graphs. Author one and pass `save: true` with a `name`.')
+  } else {
+    lines.push('| name | nodes | saved | description |')
+    lines.push('| --- | --- | --- | --- |')
+    for (const graph of graphs) {
+      lines.push(`| ${graph.name} | ${graph.nodes} | ${graph.savedAt ?? '—'} | ${graph.description || '—'} |`)
+    }
+  }
+  lines.push('')
+  lines.push('## Usage (last 200 calls)')
+  const tools = Object.entries(usage.byTool)
+  if (tools.length === 0) lines.push('No calls recorded yet.')
+  for (const [name, stats] of tools) {
+    lines.push(`- ${name}: ${stats.calls} call(s), last ${stats.lastAt}`)
+  }
+  if (usage.chainSteps > 0) {
+    lines.push(`- steps executed by chains: ${usage.chainSteps}, certificates: ${usage.certificates}`)
+  }
+  return lines.join('\n')
+}
+
+function normalizeReceipts(input) {
+  if (!Array.isArray(input)) throw new Error('receipts must be an array')
+  return input.map((receipt, index) => {
+    if (!receipt || typeof receipt !== 'object' || typeof receipt.stepId !== 'string') {
+      throw new Error(`receipts[${index}] needs a string stepId`)
+    }
+    return {
+      stepId: receipt.stepId,
+      action: receipt.action ?? 'shell',
+      args: receipt.args ?? {},
+      exitCode: Number(receipt.exitCode ?? 0),
+      stdout: String(receipt.stdout ?? ''),
+      stderr: String(receipt.stderr ?? ''),
+    }
+  })
+}
+
 function makeChainTool(ctx) {
   return {
     name: 'harnessmm_chain',
     description:
-      'Execute a pre-authored decision graph without a reasoning call per step: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns. Shell nodes run commands directly in the session directory, outside the bash sandbox, and need allowShell: true.',
+      'Execute a pre-authored decision graph without a reasoning call per step: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns, with the full output of the failing step. Shell nodes run commands directly in the session directory, outside the bash sandbox, need allowShell: true, and are refused for destructive patterns. Graphs can be saved by name and re-run later; pass `receipts` from an earlier run to resume without re-executing finished nodes.',
     parameters: {
       type: 'object',
       properties: {
         graph: {
           description: 'EDG document: {"nodes":[{"id","action":"write|shell","args","after","guard"}]}',
           type: ['object', 'string'],
+        },
+        name: {
+          description: 'Saved graph name: run it when `graph` is omitted, or store it when `save` is true.',
+          type: 'string',
+        },
+        save: {
+          description: 'Validate and store `graph` under `name` instead of running it.',
+          type: 'boolean',
+        },
+        description: {
+          description: 'One line describing a saved graph.',
+          type: 'string',
+        },
+        list: {
+          description: 'List saved graphs and usage counters instead of running anything.',
+          type: 'boolean',
+        },
+        receipts: {
+          description: 'Receipts from an earlier run, to resume a graph that already executed those nodes.',
+          type: 'array',
+          items: { type: 'object', additionalProperties: true },
         },
         rootId: {
           description: 'Receipt id of a step that already ran, when the graph continues after it.',
@@ -184,7 +250,6 @@ function makeChainTool(ctx) {
           type: 'number',
         },
       },
-      required: ['graph'],
       additionalProperties: false,
     },
     output: {
@@ -201,26 +266,67 @@ function makeChainTool(ctx) {
       render: (_args, value) => text(value.markdown),
     },
     async execute(args, exec) {
+      if (args.list === true) {
+        const markdown = renderList()
+        logUsage({ tool: 'harnessmm_chain', mode: 'list' })
+        return { markdown, stopReason: 'listed', steps: 0, certificates: 0 }
+      }
+
+      let raw = args.graph ? parseGraph(args.graph) : null
+      if (args.name && !isValidName(args.name)) {
+        throw new Error('graph name must match ^[a-z0-9][a-z0-9-]{0,62}$')
+      }
+      if (args.save === true) {
+        if (!args.name) throw new Error('save needs a name')
+        if (!raw) throw new Error('save needs a graph')
+        const compiled = compileGraph(raw, {})
+        if (!compiled.ok) throw new Error(`graph refused: ${compiled.errors.join('; ')}`)
+        const file = saveGraph(args.name, raw, { description: args.description ?? '' })
+        logUsage({ tool: 'harnessmm_chain', mode: 'save', name: args.name, nodes: compiled.graph.nodes.length })
+        return {
+          markdown: `Saved graph "${args.name}" (${compiled.graph.nodes.length} nodes) to ${file}.\nRun it with harnessmm_chain { name: "${args.name}", allowShell: true }.`,
+          stopReason: 'saved',
+          steps: 0,
+          certificates: 0,
+        }
+      }
+      if (!raw) {
+        if (!args.name) throw new Error('pass a graph, a saved name, or list: true')
+        raw = loadGraph(args.name)
+      }
+
       const cwd = await resolveCwd(ctx, exec, args.cwd)
+      const priorReceipts = args.receipts ? normalizeReceipts(args.receipts) : []
+      const started = Date.now()
       const result = runChain({
-        raw: parseGraph(args.graph),
+        raw,
         rootId: args.rootId,
+        priorIds: priorReceipts.map((receipt) => receipt.stepId),
+        priorReceipts,
         cwd,
         execute: makeExecutor({ cwd, allowShell: args.allowShell === true }),
         maxSteps: args.maxSteps ?? 20,
       })
+      const execMs = Date.now() - started
       logUsage({
         tool: 'harnessmm_chain',
+        name: args.name ?? null,
         steps: result.steps.length,
         stopReason: result.stopReason,
         certificates: result.certificates,
         allowShell: args.allowShell === true,
+        resumed: priorReceipts.length,
+        execMs,
+        savedMs: result.saved.estMs,
+        savedTokens: result.saved.estTokens,
       })
       return {
         markdown: renderChain(result),
         stopReason: result.stopReason,
         steps: result.steps.length,
         certificates: result.certificates,
+        receipts: result.receipts,
+        saved: result.saved,
       }
     },
   }

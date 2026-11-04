@@ -133,3 +133,110 @@ test('the rendered report names the stop reason and the remaining steps', () => 
   assert.match(report, /Not executed: s2/)
   assert.match(report, /Certificates: 1\/1/)
 })
+test('a stalled chain shows the full output of the failing step', () => {
+  const cwd = workspace()
+  const raw = graph([
+    { id: 's1', action: 'shell', args: { cmd: `python3 -c "print('x' * 3000); raise SystemExit(1)"` } },
+    { id: 's2', action: 'shell', args: { cmd: 'echo never' }, after: 's1', guard: { op: 'exit_code', of: 's1', eq: 0 } },
+  ])
+  const result = runChain({ raw, cwd, execute: makeExecutor({ cwd, allowShell: true }) })
+  assert.equal(result.stopReason, 'deferred')
+  const report = renderChain(result)
+  assert.equal(report.includes('x'.repeat(2500)), true, 'failing output must not be truncated to a table cell')
+})
+
+test('a chain resumes from receipts without re-running finished nodes', () => {
+  const cwd = workspace()
+  const first = runChain({
+    raw: graph([
+      { id: 's1', action: 'shell', args: { cmd: `python3 -c "print('stage1')"` } },
+      { id: 's2', action: 'shell', args: { cmd: 'exit 5' }, after: 's1', guard: { op: 'exit_code', of: 's1', eq: 0 } },
+      { id: 's3', action: 'shell', args: { cmd: 'echo done' }, after: 's2', guard: { op: 'exit_code', of: 's2', eq: 0 } },
+    ]),
+    cwd,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  assert.equal(first.stopReason, 'deferred')
+  assert.deepEqual(first.pending, ['s3'])
+
+  const second = runChain({
+    raw: graph([
+      { id: 's3', action: 'shell', args: { cmd: 'echo recovered' }, after: 's2', guard: { op: 'exit_code', of: 's2', eq: 5 } },
+    ]),
+    cwd,
+    priorIds: first.receipts.map((receipt) => receipt.stepId),
+    priorReceipts: first.receipts,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  assert.equal(second.stopReason, 'completed')
+  assert.equal(second.steps.length, 1, 'only the remaining node runs')
+  assert.match(second.steps[0].stdout, /recovered/)
+})
+
+test('destructive commands are refused before they run', () => {
+  const cwd = workspace()
+  const result = runChain({
+    raw: graph([{ id: 's1', action: 'shell', args: { cmd: 'sudo rm -rf /' } }]),
+    cwd,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  assert.equal(result.stopReason, 'error')
+  assert.match(result.detail, /refused command/)
+})
+
+test('a node can carry its own timeout', () => {
+  const cwd = workspace()
+  const started = Date.now()
+  const result = runChain({
+    raw: graph([{ id: 's1', action: 'shell', args: { cmd: 'sleep 2' }, timeoutMs: 200 }]),
+    cwd,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  assert.ok(Date.now() - started < 1500, 'timeout must cut the command short')
+  assert.notEqual(result.steps[0].exitCode, 0)
+})
+
+test('the result reports the calls a chain avoided', () => {
+  const cwd = workspace()
+  const result = runChain({
+    raw: graph([
+      { id: 's1', action: 'shell', args: { cmd: 'echo one' } },
+      { id: 's2', action: 'shell', args: { cmd: 'echo two' }, after: 's1', guard: { op: 'exit_code', of: 's1', eq: 0 } },
+    ]),
+    cwd,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  assert.equal(result.saved.avoidedCalls, 2)
+  assert.ok(result.saved.estTokens > 0)
+  assert.match(renderChain(result), /Saved \(estimate\)/)
+})
+
+test('a stopped chain prints receipts that can be passed back to resume', () => {
+  const cwd = workspace()
+  const first = runChain({
+    raw: graph([
+      { id: 's1', action: 'shell', args: { cmd: 'exit 4' } },
+      { id: 's2', action: 'shell', args: { cmd: 'echo later' }, after: 's1', guard: { op: 'exit_code', of: 's1', eq: 0 } },
+    ]),
+    cwd,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  const report = renderChain(first)
+  const match = /### Receipts \(pass back as `receipts` to resume\)\n```json\n(.+)\n```/s.exec(report)
+  assert.ok(match, 'receipts block missing')
+  const receipts = JSON.parse(match[1])
+  assert.equal(receipts[0].stepId, 's1')
+  assert.equal(receipts[0].exitCode, 4)
+
+  const second = runChain({
+    raw: graph([
+      { id: 's2', action: 'shell', args: { cmd: 'echo resumed' }, after: 's1', guard: { op: 'exit_code', of: 's1', eq: 4 } },
+    ]),
+    cwd,
+    priorIds: receipts.map((receipt) => receipt.stepId),
+    priorReceipts: receipts,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  assert.equal(second.stopReason, 'completed')
+  assert.equal(second.steps.length, 1)
+})
