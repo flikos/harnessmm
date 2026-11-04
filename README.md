@@ -36,6 +36,29 @@ Fail-closed behaviour: an absent file or field is `false` (no evidence, node sta
 malformed JSON raises `GuardError` (the controller then defers to the model), and a path outside
 the working directory is refused.
 
+## Executing a graph in a session
+
+`harnessmm_chain` runs an authored EDG in the session directory and calls the model **zero times**
+between nodes: each node executes only when its guard is proven by receipts already observed.
+It stops at the first unproven guard and reports where control returns.
+
+```json
+{"nodes": [
+  {"id": "s1", "action": "write", "args": {"path": "solution.py", "content": "..."}},
+  {"id": "s2", "action": "shell", "args": {"cmd": "python3 -m py_compile solution.py"},
+   "after": "s1", "guard": {"op": "exit_code", "of": "s1", "eq": 0}},
+  {"id": "s3", "action": "shell", "args": {"cmd": "python3 check.py"},
+   "after": "s2", "guard": {"op": "exit_code", "of": "s2", "eq": 0}}
+]}
+```
+
+A first node with no `after` and no guard is unconditional; later nodes need both.
+
+**Safety boundary:** `write` is confined to the working directory. `shell` runs commands in the
+Host process and therefore **bypasses the bash tool's sandbox** — it is refused unless the call
+passes `allowShell: true`, and the skill says to set that only when the user expects commands to
+run. The chain reports every step with its exit code and issues a certificate per substitution.
+
 ## Measured result (8 tasks, character/4 token estimate)
 
 | metric | baseline | HarnessMM |

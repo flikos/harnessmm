@@ -5,6 +5,7 @@ import { compileGraph } from './lib/graph.js'
 import { TASKS } from './lib/tasks.js'
 import { runBenchmark, renderMarkdown, writeReport } from './lib/report.js'
 import { logUsage } from './lib/usage.js'
+import { runChain, makeExecutor, renderChain } from './lib/chain.js'
 
 /**
  * HarnessMM Lab: two tools.
@@ -147,7 +148,86 @@ const benchTool = {
   },
 }
 
+async function resolveCwd(ctx, exec, explicit) {
+  if (explicit) return path.resolve(explicit)
+  const service = typeof ctx.get === 'function' ? ctx.get('workingDirectory') : undefined
+  if (service && exec.agent) return service.ensure(exec.agent, exec.signal)
+  throw new Error('cannot resolve the session directory; pass cwd explicitly')
+}
+
+function makeChainTool(ctx) {
+  return {
+    name: 'harnessmm_chain',
+    description:
+      'Execute a pre-authored decision graph without a reasoning call per step: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns. Shell nodes run commands directly in the session directory, outside the bash sandbox, and need allowShell: true.',
+    parameters: {
+      type: 'object',
+      properties: {
+        graph: {
+          description: 'EDG document: {"nodes":[{"id","action":"write|shell","args","after","guard"}]}',
+          type: ['object', 'string'],
+        },
+        rootId: {
+          description: 'Receipt id of a step that already ran, when the graph continues after it.',
+          type: 'string',
+        },
+        cwd: {
+          description: 'Working directory. Defaults to the session directory.',
+          type: 'string',
+        },
+        allowShell: {
+          description: 'Allow shell nodes. Commands run in the Host process and bypass the bash tool sandbox; only set when the user expects commands to run.',
+          type: 'boolean',
+        },
+        maxSteps: {
+          description: 'Hard cap on executed nodes (default 20).',
+          type: 'number',
+        },
+      },
+      required: ['graph'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          markdown: { type: 'string' },
+          stopReason: { type: 'string' },
+          steps: { type: 'number' },
+          certificates: { type: 'number' },
+        },
+        required: ['markdown', 'stopReason'],
+      },
+      render: (_args, value) => text(value.markdown),
+    },
+    async execute(args, exec) {
+      const cwd = await resolveCwd(ctx, exec, args.cwd)
+      const result = runChain({
+        raw: parseGraph(args.graph),
+        rootId: args.rootId,
+        cwd,
+        execute: makeExecutor({ cwd, allowShell: args.allowShell === true }),
+        maxSteps: args.maxSteps ?? 20,
+      })
+      logUsage({
+        tool: 'harnessmm_chain',
+        steps: result.steps.length,
+        stopReason: result.stopReason,
+        certificates: result.certificates,
+        allowShell: args.allowShell === true,
+      })
+      return {
+        markdown: renderChain(result),
+        stopReason: result.stopReason,
+        steps: result.steps.length,
+        certificates: result.certificates,
+      }
+    },
+  }
+}
+
 export function apply(ctx) {
   ctx.effect(() => ctx.tools.register(validateTool))
   ctx.effect(() => ctx.tools.register(benchTool))
+  ctx.effect(() => ctx.tools.register(makeChainTool(ctx)))
 }

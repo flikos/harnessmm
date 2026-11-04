@@ -25,7 +25,7 @@ function fakeContext() {
 test('the plugin registers exactly the two HarnessMM tools', () => {
   const ctx = fakeContext()
   apply(ctx)
-  assert.deepEqual([...ctx.defs.keys()].sort(), ['harnessmm_bench', 'harnessmm_validate'])
+  assert.deepEqual([...ctx.defs.keys()].sort(), ['harnessmm_bench', 'harnessmm_chain', 'harnessmm_validate'])
   for (const def of ctx.defs.values()) {
     assert.equal(typeof def.execute, 'function')
     assert.equal(def.parameters.type, 'object')
@@ -93,4 +93,44 @@ test('every tool call leaves a line in the usage ledger', async () => {
   assert.equal(lines[1].skippedCallbacks, 2)
   assert.match(lines[0].at, /^\d{4}-\d{2}-\d{2}T/)
   delete process.env.HARNESSMM_USAGE_DIR
+})
+
+test('harnessmm_chain runs a graph in an explicit directory', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harnessmm-chain-tool-'))
+  const ctx = fakeContext()
+  apply(ctx)
+  const chain = ctx.defs.get('harnessmm_chain')
+  const value = await chain.execute({
+    cwd: dir,
+    graph: {
+      nodes: [
+        { id: 's1', action: 'write', args: { path: 'note.txt', content: 'one\n' } },
+        {
+          id: 's2',
+          action: 'write',
+          args: { path: 'second.txt', content: 'two\n' },
+          after: 's1',
+          guard: { op: 'exit_code', of: 's1', eq: 0 },
+        },
+      ],
+    },
+  })
+  assert.equal(value.stopReason, 'completed')
+  assert.equal(value.steps, 2)
+  assert.equal(value.certificates, 2)
+  assert.ok(fs.existsSync(path.join(dir, 'second.txt')))
+  assert.match(chain.output.render({}, value)[0].text, /Chain completed/)
+})
+
+test('harnessmm_chain refuses shell nodes without allowShell', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harnessmm-chain-tool-'))
+  const ctx = fakeContext()
+  apply(ctx)
+  const chain = ctx.defs.get('harnessmm_chain')
+  const value = await chain.execute({
+    cwd: dir,
+    graph: { nodes: [{ id: 's1', action: 'shell', args: { cmd: 'echo hi' } }] },
+  })
+  assert.equal(value.stopReason, 'error')
+  assert.match(value.markdown, /allowShell/)
 })
