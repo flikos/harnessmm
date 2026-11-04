@@ -5,7 +5,7 @@ import { compileGraph } from './lib/graph.js'
 import { TASKS } from './lib/tasks.js'
 import { runBenchmark, renderMarkdown, writeReport } from './lib/report.js'
 import { logUsage } from './lib/usage.js'
-import { runChain, makeExecutor, renderChain } from './lib/chain.js'
+import { runChain, makeExecutor, makeSandboxExecutor, renderChain } from './lib/chain.js'
 import { saveGraph, loadGraph, listGraphs, isValidName } from './lib/library.js'
 import { summarizeUsage } from './lib/usage.js'
 
@@ -245,6 +245,11 @@ function makeChainTool(ctx) {
           description: 'Allow shell nodes. Commands run in the Host process and bypass the bash tool sandbox; only set when the user expects commands to run.',
           type: 'boolean',
         },
+        executor: {
+          description: '"direct" (default) runs shell in the Host process and needs allowShell; "sandboxed" runs shell through the native bash tool, inheriting its sandbox and permission policy.',
+          type: 'string',
+          enum: ['direct', 'sandboxed'],
+        },
         maxSteps: {
           description: 'Hard cap on executed nodes (default 20).',
           type: 'number',
@@ -281,10 +286,10 @@ function makeChainTool(ctx) {
         if (!raw) throw new Error('save needs a graph')
         const compiled = compileGraph(raw, {})
         if (!compiled.ok) throw new Error(`graph refused: ${compiled.errors.join('; ')}`)
-        const file = saveGraph(args.name, raw, { description: args.description ?? '' })
-        logUsage({ tool: 'harnessmm_chain', mode: 'save', name: args.name, nodes: compiled.graph.nodes.length })
+        const saved = saveGraph(args.name, raw, { description: args.description ?? '' })
+        logUsage({ tool: 'harnessmm_chain', mode: 'save', name: args.name, nodes: compiled.graph.nodes.length, stamp: saved.stamp })
         return {
-          markdown: `Saved graph "${args.name}" (${compiled.graph.nodes.length} nodes) to ${file}.\nRun it with harnessmm_chain { name: "${args.name}", allowShell: true }.`,
+          markdown: `Saved graph "${args.name}" (${compiled.graph.nodes.length} nodes, stamp ${saved.stamp}) to ${saved.file}.\nRun it with harnessmm_chain { name: "${args.name}", allowShell: true }.`,
           stopReason: 'saved',
           steps: 0,
           certificates: 0,
@@ -297,14 +302,21 @@ function makeChainTool(ctx) {
 
       const cwd = await resolveCwd(ctx, exec, args.cwd)
       const priorReceipts = args.receipts ? normalizeReceipts(args.receipts) : []
+      const sandboxed = args.executor === 'sandboxed'
+      const execute = sandboxed
+        ? makeSandboxExecutor({
+            dispatch: (input) => ctx.tools.execute({ ...input, agent: exec.agent, signal: exec.signal }),
+            cwd,
+          })
+        : makeExecutor({ cwd, allowShell: args.allowShell === true })
       const started = Date.now()
-      const result = runChain({
+      const result = await runChain({
         raw,
         rootId: args.rootId,
         priorIds: priorReceipts.map((receipt) => receipt.stepId),
         priorReceipts,
         cwd,
-        execute: makeExecutor({ cwd, allowShell: args.allowShell === true }),
+        execute,
         maxSteps: args.maxSteps ?? 20,
       })
       const execMs = Date.now() - started
@@ -315,8 +327,10 @@ function makeChainTool(ctx) {
         stopReason: result.stopReason,
         certificates: result.certificates,
         allowShell: args.allowShell === true,
+        executor: sandboxed ? 'sandboxed' : 'direct',
         resumed: priorReceipts.length,
         execMs,
+        stepMs: result.steps.map((step) => ({ id: step.id, ms: step.ms })),
         savedMs: result.saved.estMs,
         savedTokens: result.saved.estTokens,
       })

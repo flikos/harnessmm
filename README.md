@@ -137,3 +137,22 @@ debugging, and anything where a guard's proven condition is weaker than the corr
 - **Accounting.** Every run reports `saved: { avoidedCalls, estTokens, estMs }` and appends the same
   numbers to the ledger. The ledger lives in `~/.harnessmm/usage/usage.jsonl` (the old temporary
   ledger is migrated once), so "was this used, and did it help" survives a reboot.
+
+## Executor modes
+
+`harnessmm_chain` accepts `executor`:
+
+- `"direct"` (default) — shell runs in the Host process via `spawnSync`. Fastest, but outside the
+  bash tool's sandbox and approval flow; requires `allowShell: true`. The denylist still applies.
+- `"sandboxed"` — shell runs through the native `bash` tool (`ctx.tools.execute`), inheriting the
+  file sandbox, permission policy and approval flow. `allowShell` is not required. Parsing of the
+  bash result is best-effort (structured `value.exitCode`, block arrays, or the `[exit code: N]`
+  marker); an unparsable result is an error, never an assumed success. `write` nodes stay direct
+  in both modes (contained to cwd).
+
+Every run logs `executor`, `execMs` and per-node `stepMs` to the ledger — the metrics needed to
+decide later whether parallel branches are worth building.
+
+Saved graphs keep immutable stamped copies (`<name>@<stamp>.json`) beside the mutable
+`<name>.json`, so a certificate's `graph_hash` always resolves to the exact graph it was issued
+for.
