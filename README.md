@@ -1,158 +1,140 @@
-# HarnessMM prototype
+# HarnessMM for DeepSeek Harness
 
-A working prototype of the mechanism from [HarnessMM (arXiv:2610.32813)](https://arxiv.org/abs/2610.32813):
-a controller at the model–tool boundary that executes **already resolved** decisions on
-observed receipts instead of paying for another reasoning call.
+A working toolkit for the mechanism from [HarnessMM (arXiv:2610.32813)](https://arxiv.org/abs/2610.32813):
+**guarded decision reuse** — a controller executes decisions that were already resolved, on evidence
+from observed receipts, instead of paying for another reasoning call.
 
-## What is implemented
+This is an independent implementation written from the paper, not a port of the authors' code. It
+ships as a DSH plugin with three tools, a measurement lab, and an agent skill that says when the
+mechanism pays for itself and when it does not.
 
-| piece | file | what it does |
-| --- | --- | --- |
-| EDG schema + compile | `lib/graph.js` | nodes with literal args, predecessor, guard; rejects placeholders, cycles, non-causal guards, unknown ops |
-| Guards | `lib/guards.js` | `exists`, `exit_code`, `stdout_contains`, `stderr_contains`, `file_exists`, `file_contains`, `json_field`, `all/any/not`; evidence comes only from receipts and files, unknown evidence throws |
-| Controller | `lib/controller.js` | eligibility = predecessor completed ∧ guard proven ∧ args closed; unique → execute, ambiguous → abstain, none → defer to actor |
-| Certificates | `lib/controller.js` | binds graph hash, decision id, predecessor receipt, exact args, tool receipt, bypassed callback; `verifyCertificate` replays the binding |
-| Accounting | `lib/cost.js` | per-call input/output estimates, break-even |
-| Benchmark | `lib/report.js`, `bin/bench.mjs` | same tasks and tools through baseline vs guarded-reuse arm |
+## Tools
 
-The benchmark executes **real tools** (`write`, `python3 -m py_compile`, `python3 check.py`) in
-temporary directories.
+| tool | role |
+| --- | --- |
+| `harnessmm_chain` | the work tool: executes an authored decision graph in the session directory with **zero model calls between nodes** |
+| `harnessmm_validate` | admission check for a graph before anyone trusts it |
+| `harnessmm_bench` | measurement lab: the same scripted task set through a baseline arm and a guarded-reuse arm |
 
-## Reading a structured answer without the model
+## How a chain works
 
-`json_field` turns a machine-checkable result into a guard, so the next step in the chain runs on
-the receipt alone:
-
-```json
-{"id": "s3", "action": "shell", "args": {"cmd": "python3 verify.py"}, "after": "s2",
- "guard": {"op": "json_field", "of": "s2", "field": "answer", "eq": 42}}
-```
-
-`of` parses the predecessor's stdout as JSON; `path` reads a JSON file under the task directory
-(same containment rule as `file_exists`). The field path supports nesting and indexes
-(`a.b[0].c`), and the comparison is `eq`, `ne` or `exists`. `file_contains` checks raw file text.
-
-Fail-closed behaviour: an absent file or field is `false` (no evidence, node stays ineligible),
-malformed JSON raises `GuardError` (the controller then defers to the model), and a path outside
-the working directory is refused.
-
-## Executing a graph in a session
-
-`harnessmm_chain` runs an authored EDG in the session directory and calls the model **zero times**
-between nodes: each node executes only when its guard is proven by receipts already observed.
-It stops at the first unproven guard and reports where control returns.
+A chain is an Executable Decision Graph (EDG): nodes with an `action` (`write` or `shell`), fully
+literal `args`, an `after` predecessor, and a `guard` over observed evidence.
 
 ```json
 {"nodes": [
   {"id": "s1", "action": "write", "args": {"path": "solution.py", "content": "..."}},
   {"id": "s2", "action": "shell", "args": {"cmd": "python3 -m py_compile solution.py"},
-   "after": "s1", "guard": {"op": "exit_code", "of": "s1", "eq": 0}},
+   "after": "s1", "guard": {"op": "exit_code", "of": "s1", "eq": 0},
+   "required_receipt_fields": ["exitCode"]},
   {"id": "s3", "action": "shell", "args": {"cmd": "python3 check.py"},
-   "after": "s2", "guard": {"op": "exit_code", "of": "s2", "eq": 0}}
+   "after": "s2", "guard": {"op": "exit_code", "of": "s2", "eq": 0},
+   "required_receipt_fields": ["exitCode"]}
 ]}
 ```
 
-A first node with no `after` and no guard is unconditional; later nodes need both.
+A node runs only when its predecessor completed **and** its guard is proven by receipts already
+observed. Every substitution issues a certificate binding the graph hash, the decision, the
+predecessor receipt, the exact arguments and the tool receipt; `verifyCertificate` re-derives the
+binding on demand.
 
-**Safety boundary:** `write` is confined to the working directory. `shell` runs commands in the
-Host process and therefore **bypasses the bash tool's sandbox** — it is refused unless the call
-passes `allowShell: true`, and the skill says to set that only when the user expects commands to
-run. The chain reports every step with its exit code and issues a certificate per substitution.
+**Guards** read receipts and files only: `exists`, `exit_code`, `stdout_contains`,
+`stderr_contains`, `file_exists`, `file_contains`, `json_field` (a file or a receipt's stdout, with
+nested field paths like `a.b[0].c` and `eq`/`ne`/`exists`), composed with `all`/`any`/`not`.
+Unknown operators, unreadable evidence and paths escaping the working directory all fail closed.
+`required_receipt_fields` makes a node declare which receipt fields its guard reads; compilation
+rejects a guard on an undeclared field.
 
-## Measured result (8 tasks, character/4 token estimate)
+**Three-valued verdicts.** Every evaluation separates *the evidence says no* (`guard-negative`, a
+fact) from *the evidence cannot be read* (`evidence-absent` / `evidence-unreadable`). A stopped
+chain reports the reason per pending node — in the rendered result, the returned value and the
+ledger — so a deferral is diagnosable instead of guesswork.
 
-| metric | baseline | HarnessMM |
-| --- | --- | --- |
-| success | 8/8 | 8/8 |
-| reasoning calls | 37 | 18 |
-| total tokens | 5 828 | 3 613 |
-| tokens / task | 728.5 | 451.6 |
+**Stopping.** The chain stops on the first unproven guard (`deferred`), a refused command or
+executor failure (`error`), an invalid graph (rejected before anything runs), or `maxSteps`.
+A stopped result carries the full output of the failing step (up to 16 KB, not a table cell) and a
+`receipts` block: pass it back with a repaired graph and finished nodes are not re-executed.
 
-- callbacks avoided: **19**
-- tokens removed: **2 215** (38.01 %)
-- graph authorship overhead: **669** tokens
-- break-even: **5** substituted callbacks per compiled graph
-- certificates: **19** issued, **19** verified by replay
-- graphs rejected by closure/dependency checks: 0
+**Saved graphs.** `{graph, name, save: true}` validates and stores a graph under
+`~/.harnessmm/graphs/<name>.json`, plus an immutable `<name>@<stamp>.json` copy so a certificate's
+`graph_hash` always resolves to the exact graph it was issued for. `{name}` runs it; `{list: true}`
+shows saved graphs and usage counters.
 
-Reproduce: `node bin/bench.mjs` (add `--json` for the summary object).
+## Executor modes and safety
+
+| mode | shell runs in | consent | notes |
+| --- | --- | --- | --- |
+| `direct` (default) | the Host process via `spawnSync` | `allowShell: true` required | fastest; outside the bash tool's sandbox |
+| `sandboxed` | the native `bash` tool (`ctx.tools.execute`) | none beyond the call | inherits file sandbox, permission policy and approvals; result parsing is fail-closed |
+
+Both modes refuse a denylist of destructive commands (`sudo`, recursive delete of `/`, `mkfs`,
+`dd if=`, piping a download into a shell, fork bombs, raw disk writes) and honour a per-node
+`timeoutMs`. Direct execution scrubs environment variables whose name matches
+`key|password|secret|token|credential|passwd`, so an unattended command cannot echo a credential
+into the transcript. `write` nodes are confined to the working directory in both modes.
+
+## What it measures
+
+Two independent measurements, both reproducible:
+
+**Lab benchmark** (`node bin/bench.mjs`, 8 scripted coding tasks, real `python3` subprocesses,
+character/4 token estimate): 19 reasoning callbacks avoided, 2 215 tokens removed (38.01 %),
+graph authorship overhead 669 tokens, break-even 5 substituted callbacks, 19/19 certificates
+verified. The actor is a deterministic replay, so the two arms differ only in *when* a decision is
+produced.
+
+**Live session experiment** ([docs/benefit-report.md](docs/benefit-report.md)): one real
+verification task (syntax → tests → bench → git → report) run as 5 separate tool calls versus
+validate + one chain call — 3 model steps and ~33 s of step latency saved, ~2k tokens kept out of
+the replayed transcript, identical outcomes.
+
+Savings reporting is deliberately split: **substitutions are measured; token and time savings are a
+labeled constant model** (`avgStepTokens`/`avgStepMs`), never presented as measured tokens.
+
+## Observability
+
+Every invocation appends one JSON line to `~/.harnessmm/usage/usage.jsonl` (override with
+`HARNESSMM_USAGE_DIR`; the legacy temporary ledger is migrated once): tool, arguments, stop reason,
+certificates, executor, per-node `stepMs`, defer reasons and the savings model output. Test runs
+write to a throwaway ledger, never the live one.
+
+The agent skill lives in [skills/harnessmm/SKILL.md](skills/harnessmm/SKILL.md) (installed copy:
+`~/.agents/skills/harnessmm/`): triggers (≥3 mechanical steps with observable gates), anti-triggers
+(exploration, content-branching, <3 steps), guard rules and stop conditions.
 
 ## The honest boundary
 
-1. **The actor is a replay, not an LLM.** Its decisions are scripted so the two arms make the
-   same semantic choices; only the *moment* of the reasoning call differs. Token counts are
-   `characters / 4` over the exact prompt and decision strings, not a tokenizer.
-2. **This does not skip a live model call in DSH.** `agent/pre-step` can reject or replace
-   messages but cannot suppress a reasoning step, so a plugin cannot remove a callback from a
-   running session. The prototype therefore runs the substitution in-process, and the installed
-   plugin exposes `harnessmm_bench` / `harnessmm_validate` rather than silently rewriting the agent.
+1. **This plugin does not rewrite the agent loop.** Substitution happens inside one explicit
+   `harnessmm_chain` call — granularity "tool call", not "reasoning boundary". The model still
+   authors the graph and reads the result.
+2. **Boundary-level substitution in DSH is possible, just not here.** A plugin can intercept
+   `llm/stream` and answer with a synthesized tool call, as
+   [DSH-Extensions-list/dsh-harnessmm](https://github.com/DSH-Extensions-list/dsh-harnessmm)
+   demonstrates with the authors' vendored controller. Earlier revisions of this README claimed a
+   plugin *cannot* remove a live model callback; that was wrong — it was based on `agent/pre-step`
+   alone. A minimal proof-of-concept of `llm/stream` interception (probe profile, no vendoring) is
+   on the roadmap.
 3. **Guards prove their own condition, not correctness.** `exit_code(compile) == 0` proves the
-   build succeeded; it does not prove the program is right. The two repair tasks (roman, balanced)
-   exercise the fail-closed path: the tests node stays ineligible, control returns to the actor,
-   and the actor authors a second graph.
+   build succeeded, not that the program is right.
+4. **Benchmark token numbers are `characters / 4` estimates** over exact prompt strings, from a
+   scripted actor — not tokenizer counts, not model quality claims.
 
-## Installed as a plugin
+## Related implementations
 
-The package is a DSH bundle (`dsh.bundle.patch`), installed in the `desktop` profile. It adds two
-tools: `harnessmm_validate` (graph admission check) and `harnessmm_bench` (measured accounting).
+| | [jlon/pi-harnessmm](https://github.com/jlon/pi-harnessmm) | [DSH-Extensions-list/dsh-harnessmm](https://github.com/DSH-Extensions-list/dsh-harnessmm) | this repo |
+| --- | --- | --- | --- |
+| platform | pi | DSH | DSH |
+| mechanism | controller inside the root terminal call | `llm/stream` interception, authors' vendored code (7.8 MB, pinned rev) + Python RSI | explicit chain tool, own implementation from the paper |
+| graph contract | authors' `<CHISEL_PLAN>`, parity-tested against the reference | authors' schema, vendored | own EDG schema (incompatible with `<CHISEL_PLAN>`) |
+| adopted from them | — | — | three-valued guard verdicts, `required_receipt_fields`, env scrubbing, substitutions-not-counterfactuals accounting |
 
-## How to tell the plugin was used
+## Development
 
-A tool call is the only way this plugin can act, so usage is never implicit. Three traces, in order
-of strength:
+```bash
+node --test test/*.test.mjs    # 56 tests
+node bin/bench.mjs [--tasks add,roman] [--json]
+```
 
-1. **The tool card in the session** — the call and its rendered result are part of the transcript.
-2. **`usage.jsonl`** — one line per invocation (`at`, `tool`, arguments, outcome), appended to
-   `$HARNESSMM_USAGE_DIR`, default `<tmp>/harnessmm-out/usage.jsonl`:
-   `{"at":"2026-11-03T04:06:26.830Z","tool":"harnessmm_bench","tasks":["add","gcd"],...}`
-3. **Artifacts with timestamps** — `report.md` / `results.json` are rewritten per run; the
-   certificates inside are the evidence that substitutions actually happened (a certificate whose
-   receipt no longer matches fails verification).
-
-The ledger was added after the plugin was already loaded, so the running Host keeps the previous
-module generation until Harness restarts.
-
-## When this mechanism pays off
-
-Good fit: long mechanical chains whose next step is decided by a *receipt* rather than by meaning
-(build → test → lint → run, migrations, batch pipelines over many similar items), and repeated
-patterns where one authored graph serves several transitions.
-
-Bad fit: one- or two-step tasks (graph authorship does not amortise — break-even was 5 substituted
-callbacks in the measured run), steps that branch on the *content* of an observation, exploratory
-debugging, and anything where a guard's proven condition is weaker than the correctness you need.
-## Saved graphs, resume, and accounting
-
-- **Saved graphs.** `harnessmm_chain { graph, name, save: true }` validates the graph and stores it
-  under `name` in `~/.harnessmm/graphs/`. Run it later with `{ name }` — no re-authoring, no
-  re-validation, no model tokens spent on rebuilding the plan. `{ list: true }` shows saved graphs
-  and usage counters.
-- **Resume.** A stopped chain returns its `receipts`. Pass them back as `receipts` with a repaired
-  graph: finished nodes are not re-executed, and guards may reference them.
-- **Failure detail.** When a chain stops, the report includes the *full* output of the failing step
-  (up to 16 KB), not the 120-character table cell — that is what you need to fix the graph.
-- **Command safety.** `allowShell: true` is blanket consent, so the executor refuses a small
-  denylist (`sudo`, recursive delete of `/`, `mkfs`, `dd if=`, piping a download into a shell, fork
-  bombs, raw disk writes) and honours a per-node `timeoutMs`.
-- **Accounting.** Every run reports `saved: { avoidedCalls, estTokens, estMs }` and appends the same
-  numbers to the ledger. The ledger lives in `~/.harnessmm/usage/usage.jsonl` (the old temporary
-  ledger is migrated once), so "was this used, and did it help" survives a reboot.
-
-## Executor modes
-
-`harnessmm_chain` accepts `executor`:
-
-- `"direct"` (default) — shell runs in the Host process via `spawnSync`. Fastest, but outside the
-  bash tool's sandbox and approval flow; requires `allowShell: true`. The denylist still applies.
-- `"sandboxed"` — shell runs through the native `bash` tool (`ctx.tools.execute`), inheriting the
-  file sandbox, permission policy and approval flow. `allowShell` is not required. Parsing of the
-  bash result is best-effort (structured `value.exitCode`, block arrays, or the `[exit code: N]`
-  marker); an unparsable result is an error, never an assumed success. `write` nodes stay direct
-  in both modes (contained to cwd).
-
-Every run logs `executor`, `execMs` and per-node `stepMs` to the ledger — the metrics needed to
-decide later whether parallel branches are worth building.
-
-Saved graphs keep immutable stamped copies (`<name>@<stamp>.json`) beside the mutable
-`<name>.json`, so a certificate's `graph_hash` always resolves to the exact graph it was issued
-for.
+Install into a profile with `plugin_manager` `install_bundle` pointing at this directory; source
+changes under `lib/` need remove + install to reach the running Host. No LICENSE yet — the repo is
+public but all rights reserved until one is chosen.
