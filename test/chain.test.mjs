@@ -208,7 +208,10 @@ test('the result reports the calls a chain avoided', async () => {
   })
   assert.equal(result.saved.avoidedCalls, 2)
   assert.ok(result.saved.estTokens > 0)
-  assert.match(renderChain(result), /Saved \(estimate\)/)
+  const report = renderChain(result)
+  assert.match(report, /Substitutions: 2 \(measured\)/)
+  assert.match(report, /constant model/)
+  assert.equal(report.includes('Saved (estimate)'), false, 'no estimate may read as a measured saving')
 })
 
 test('a stopped chain prints receipts that can be passed back to resume', async () => {

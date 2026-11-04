@@ -45,6 +45,11 @@ Saved graphs make the second run free; receipts make an interrupted chain resuma
   `stdout_contains`.
 - A condition you cannot write as a literal is not a guard: do not build the chain around it.
 - Never author a guard whose truth does not imply what you actually need.
+- Declare `required_receipt_fields` (`exitCode`/`stdout`/`stderr`) on nodes whose guard reads a
+  receipt; a guard on an undeclared field is rejected at compile time.
+- A stopped chain explains every pending node (`guard-negative` vs `evidence-unreadable` vs
+  `waiting-for-predecessor`). Read that before re-authoring: a negative means the world disagreed
+  with the plan; an unreadable means the evidence was missing.
 
 ## Stop conditions
 
