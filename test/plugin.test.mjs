@@ -6,6 +6,11 @@ import path from 'node:path'
 import { apply } from '../index.js'
 import { readUsage } from '../lib/usage.js'
 
+// Tests exercise the real tool code, which logs usage. Point the ledger at a
+// throwaway directory so test runs never pollute the live usage.jsonl.
+const TEST_USAGE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'harnessmm-test-usage-'))
+process.env.HARNESSMM_USAGE_DIR = TEST_USAGE_DIR
+
 function fakeContext() {
   const defs = new Map()
   return {
@@ -92,7 +97,7 @@ test('every tool call leaves a line in the usage ledger', async () => {
   assert.equal(lines[1].tool, 'harnessmm_bench')
   assert.equal(lines[1].skippedCallbacks, 2)
   assert.match(lines[0].at, /^\d{4}-\d{2}-\d{2}T/)
-  delete process.env.HARNESSMM_USAGE_DIR
+  process.env.HARNESSMM_USAGE_DIR = TEST_USAGE_DIR
 })
 
 test('harnessmm_chain runs a graph in an explicit directory', async () => {
