@@ -8,6 +8,7 @@ import { logUsage } from './lib/usage.js'
 import { runChain, makeExecutor, makeSandboxExecutor, renderChain } from './lib/chain.js'
 import { saveGraph, loadGraph, listGraphs, isValidName } from './lib/library.js'
 import { findReusableChain } from './lib/match.js'
+import { resolveMode } from './lib/modes.js'
 import { summarizeUsage } from './lib/usage.js'
 
 /**
@@ -226,11 +227,13 @@ function normalizeReceipts(input) {
   })
 }
 
+const CHAIN_DESCRIPTION =
+  'Execute a pre-authored decision graph without a reasoning call per step: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns, with the full output of the failing step. Shell nodes run commands directly in the session directory, outside the bash sandbox, need allowShell: true, and are refused for destructive patterns. Graphs can be saved by name and re-run later; pass `receipts` from an earlier run to resume without re-executing finished nodes.'
+
 function makeChainTool(ctx) {
   return {
     name: 'harnessmm_chain',
-    description:
-      'Execute a pre-authored decision graph without a reasoning call per step: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns, with the full output of the failing step. Shell nodes run commands directly in the session directory, outside the bash sandbox, need allowShell: true, and are refused for destructive patterns. Graphs can be saved by name and re-run later; pass `receipts` from an earlier run to resume without re-executing finished nodes.',
+    description: CHAIN_DESCRIPTION,
     parameters: {
       type: 'object',
       properties: {
@@ -307,7 +310,9 @@ function makeChainTool(ctx) {
       render: (_args, value) => text(value.markdown),
     },
     async execute(args, exec) {
-      if (args.list === true) {
+      const mode = resolveMode(args)
+
+      if (mode.kind === 'list') {
         const markdown = renderList()
         logUsage({ tool: 'harnessmm_chain', ...attribution(exec), mode: 'list' })
         return { markdown, stopReason: 'listed', steps: 0, certificates: 0 }
@@ -317,9 +322,7 @@ function makeChainTool(ctx) {
       if (args.name && !isValidName(args.name)) {
         throw new Error('graph name must match ^[a-z0-9][a-z0-9-]{0,62}$')
       }
-      if (args.save === true) {
-        if (!args.name) throw new Error('save needs a name')
-        if (!raw) throw new Error('save needs a graph')
+      if (mode.kind === 'save') {
         const compiled = compileGraph(raw, { rootId: args.rootId, priorIds: args.priorIds ?? [] })
         if (!compiled.ok) throw new Error(`graph refused: ${compiled.errors.join('; ')}`)
         const saved = saveGraph(args.name, raw, { description: args.description ?? '', intent: args.intent ?? '' })
@@ -331,7 +334,7 @@ function makeChainTool(ctx) {
           certificates: 0,
         }
       }
-      if (!raw && !args.name && typeof args.solve === 'string') {
+      if (mode.kind === 'solve') {
         const match = findReusableChain(args.solve, listGraphs(), {
           minCoverage: 0.6,
           minPrecision: 0.25,
@@ -360,9 +363,8 @@ function makeChainTool(ctx) {
         }
         raw = loadGraph(match.name)
       }
-      if (!raw) {
-        if (!args.name) throw new Error('pass a graph, a saved name, solve, or list: true')
-        raw = loadGraph(args.name)
+      if (mode.kind === 'named') {
+        raw = loadGraph(mode.name)
       }
 
       const cwd = await resolveCwd(ctx, exec, args.cwd)
@@ -389,6 +391,7 @@ function makeChainTool(ctx) {
         tool: 'harnessmm_chain',
         ...attribution(exec),
         name: args.name ?? null,
+        mode: 'run',
         steps: result.steps.length,
         stopReason: result.stopReason,
         certificates: result.certificates,
