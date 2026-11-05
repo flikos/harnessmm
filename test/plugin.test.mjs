@@ -158,25 +158,19 @@ test('harnessmm_chain refuses shell nodes without allowShell', async () => {
   assert.match(value.markdown, /allowShell/)
 })
 
-test('harnessmm_chain saves a graph, lists it, and runs it by name', async () => {
+test('harnessmm_chain refuses the removed library paths and names the replacement', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harnessmm-chain-tool-'))
   const ctx = fakeContext()
   apply(ctx)
   const chain = ctx.defs.get('harnessmm_chain')
+  const graph = { nodes: [{ id: 's1', action: 'write', args: { path: 'a.txt', content: 'hi' } }] }
 
-  const saved = await chain.execute({
-    name: 'smoke-write',
-    save: true,
-    description: 'writes one file',
-    graph: { nodes: [{ id: 's1', action: 'write', args: { path: 'a.txt', content: 'hi' } }] },
-  })
-  assert.equal(saved.stopReason, 'saved')
+  await assert.rejects(() => chain.execute({ name: 'smoke-write', save: true, graph }), /save is gone/)
+  await assert.rejects(() => chain.execute({ list: true }), /list is gone/)
+  await assert.rejects(() => chain.execute({ name: 'smoke-write', cwd: dir }), /name is gone/)
+  await assert.rejects(() => chain.execute({ solve: 'run the checks', cwd: dir }), /solve is gone/)
 
-  const listed = await chain.execute({ list: true })
-  assert.match(listed.markdown, /smoke-write/)
-  assert.match(listed.markdown, /Usage \(last 200 calls\)/)
-
-  const run = await chain.execute({ name: 'smoke-write', cwd: dir })
+  const run = await chain.execute({ graph, cwd: dir })
   assert.equal(run.stopReason, 'exhausted')
   assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8'), 'hi')
 })

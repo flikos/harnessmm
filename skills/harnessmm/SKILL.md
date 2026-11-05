@@ -1,76 +1,76 @@
 ---
 name: harnessmm
-description: "Run a multi-step mechanical chain without a reasoning call per step. Use when a task has 3+ steps whose readiness is decided by an observable receipt (exit code, file existence, JSON field) — build/test/lint/format/migrate sequences, verification gates, or the same chain over many similar items. Call `harnessmm_chain` with `solve` and the request in the user's own words first: a saved chain whose declared intent matches runs without authoring. Not for exploratory debugging, 1–2 step tasks, or steps that branch on the meaning of output."
+description: "Run several mechanical steps in one tool call without a reasoning round-trip between them. Use when the next step's readiness is decided by an observable fact — exit code, a file, a JSON field — and you can state that expectation up front: build → test → lint → report, migrations, deploy then smoke-check. Not for exploratory debugging, steps whose continuation depends on reading output, or one-step tasks."
 ---
 
 # HarnessMM chain
 
-`harnessmm_chain` executes a decision graph (EDG) inside the session directory. A node runs only
-when its guard is proven by receipts already observed; the model is not called between nodes.
-Saved graphs make the second run free; receipts make an interrupted chain resumable.
+`harnessmm_chain` runs a plan inside one tool call. A step runs only when the
+step before it produced the receipt you said to expect; nothing is asked of you
+between steps. When reality disagrees, the call stops and hands you the evidence.
 
-## Start here: ask the library before authoring
-
-Call `harnessmm_chain { solve: "<the request in the user's own words>" }` first. The library
-matches by what a chain declares it is *for* (`intent`), so you pass the person's sentence, not a
-magic phrase — nothing needs registering per request, and the user never has to guess wording.
-
-- A hit runs the saved chain immediately: start your turn with zero reasoning steps between nodes.
-- `no-match` lists what exists. Then author the graph, and if the request will recur, save it with an
-  `intent` so the next person's wording finds it.
-
-Add `rootId` to every `solve` or `name` run: a chain starts from a receipt the author already holds
-(the command you just ran). Without it the graph has no root and is rejected.
+Nothing is registered or saved. The plan is stated in the call, every time.
 
 ## When to use
 
-- Three or more mechanical steps, each ready on an observable fact: exit code, file written, JSON
-  field value.
-- Verification gates (syntax → tests → lint → bench → report) and build chains.
-- The same chain repeated over similar items, or across sessions: save it under a name.
+- You can name the next step **now**, and what it will look like when it
+  worked: an exit code, a file that exists, a field in JSON output.
+- Three or more such steps, or a repeatable sequence you run often.
+- The whole continuation is mechanical: no judgement between steps.
 
 ## When not to
 
-- Exploration, debugging, or any step decided by reading output.
-- One or two steps: graph authorship costs more than it saves.
-- Where "guard passed" does not imply "result is correct" and no verifier exists.
+- Exploration or debugging: the next step depends on what the output *means*.
+- One or two steps: authoring the plan costs more than it saves.
+- A step whose success you cannot express as a literal fact.
 
 ## Procedure
 
-1. Author the whole chain before running it: every `args` value is a literal (no `$VAR`, no
-   `{{}}`), every node names its `after` predecessor, every guard names an earlier receipt.
-2. The first node has no `after` and no guard; it is the only unconditional step.
-3. `harnessmm_validate` first. A rejection means the graph is wrong — fix it, do not run it.
-4. Run it, or store it with `save: true` and a `name`; later runs are `{ name }` only.
-5. Give it an **intent**: `intent: "<what it is for, in a person's words>"`. That sentence is the
-   only registration this plugin has, and it is what `solve` matches later. A chain saved without
-   intent runs by name but is never suggested.
-6. Choose the executor: `"sandboxed"` runs shell through the native bash tool (sandbox, policy
-   and approvals apply; use it whenever commands are not obviously safe). `"direct"` needs
-   `allowShell: true`, runs in the Host process, and is only for trusted mechanical commands.
-   Destructive patterns are refused in both modes; `timeoutMs` per node is honoured.
-7. Read the result: `completed`, `deferred` (no eligible node — control returns to you), `error`,
-   `invalid-graph`, `saved`. `deferred` is an answer, not a failure: the report carries the full
-   output of the failing step.
-8. To continue: fix the graph and pass the run's `receipts` back — finished nodes are not re-run
-   and guards may reference them.
+1. Write the plan as `steps`, first step first. Each step is `{run, expect}`:
+   - `run` — the command with every argument already resolved. No `$VAR`, no
+     placeholders: an unresolved argument means the value still depends on
+     future reasoning, which is exactly what this tool exists to avoid.
+   - `expect` — what the **previous** step must have produced. Omit it when the
+     step needs no gate (the first step never has one).
+2. Pass the result of a step you have already run as `rootId` only when you are
+   continuing work that began outside the plan.
+3. Call `harnessmm_validate` first when the plan is longer than a few steps, or
+   when a guard is subtle. A rejection means the plan is wrong — fix it, do not
+   run it.
+4. Choose the executor: `"sandboxed"` runs shell through the native bash tool,
+   inheriting its sandbox, policy and approvals — use it unless the commands are
+   obviously safe. `"direct"` needs `allowShell: true`, runs in the Host process,
+   and is only for trusted mechanical commands. Destructive patterns are refused
+   in both; `timeoutMs` per step is honoured.
+5. Read the result. Four statuses, each a different decision:
+
+   | status | meaning | what to do |
+   | --- | --- | --- |
+   | `exhausted` | every step ran | answer; nothing to re-derive |
+   | `expectation-failed` | the world disagreed | read `failure` — it carries the failing step's full output — and decide the recovery |
+   | `evidence-unreadable` | the expected fact was not there | do not guess: the output was not what a guard can read |
+   | `execution-error` | the command could not run | fix the invocation |
 
 ## Guard rules
 
-- The exit code of a verifier beats a substring of its output; `json_field` beats
-  `stdout_contains`.
-- A condition you cannot write as a literal is not a guard: do not build the chain around it.
+- The exit code of a verifier beats a substring of its output; `json_field`
+  beats `stdout_contains`.
+- A condition you cannot write as a literal is not a guard: do not build the
+  plan around it.
 - Never author a guard whose truth does not imply what you actually need.
-- Declare `required_receipt_fields` (`exitCode`/`stdout`/`stderr`) on nodes whose guard reads a
-  receipt; a guard on an undeclared field is rejected at compile time.
-- A stopped chain explains every pending node (`guard-negative` vs `evidence-unreadable` vs
-  `waiting-for-predecessor`). Read that before re-authoring: a negative means the world disagreed
-  with the plan; an unreadable means the evidence was missing.
+- Guards read a receipt; in the linear form the receipt is always the step
+  above, so declare receipt fields only when you also pass a graph.
+
+## What it is worth
+
+The result reports `avoidedRoundTrips`: model boundaries crossed without a call,
+counted, not estimated. A plan of N steps removes N − 1 round-trips when it runs
+to the end.
 
 ## Stop conditions
 
-- Two consecutive guard failures: abandon substitution and continue normally.
-- The chain stops by itself; do not loop it to force progress.
+- Two consecutive failed expectations: stop substituting and work normally.
+- The plan stops itself; do not re-run it hoping for a different result.
 
-`harnessmm_bench` is a measurement harness, not a work tool: use it only when someone asks how the
-mechanism performs.
+`harnessmm_bench` is a measurement harness, not a work tool: use it only when
+someone asks how the mechanism performs.

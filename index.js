@@ -6,8 +6,6 @@ import { TASKS } from './lib/tasks.js'
 import { runBenchmark, renderMarkdown, writeReport } from './lib/report.js'
 import { logUsage } from './lib/usage.js'
 import { runChain, makeExecutor, makeSandboxExecutor, renderChain } from './lib/chain.js'
-import { saveGraph, loadGraph, listGraphs, isValidName } from './lib/library.js'
-import { findReusableChain } from './lib/match.js'
 import { resolveMode } from './lib/modes.js'
 import { summarizeUsage } from './lib/usage.js'
 
@@ -19,9 +17,9 @@ import { summarizeUsage } from './lib/usage.js'
  *    guarded-reuse arm and returns measured token accounting.
  *  - harnessmm_chain executes a saved or inline graph and reports receipts.
  * The tools never touch this session's model loop. Understanding a request is
- * the model's job: a chain is suggested by `solve`, which matches a request
- * against what saved graphs declare they are for — no phrase registry, no
- * interception. See docs/quickstart.md.
+ * the model's job: it states the plan itself, in the call, as a list of steps
+ * with their expectations. Nothing is registered in advance and nothing is
+ * matched by wording. See docs/quickstart.md.
  */
 export const inject = ['tools']
 
@@ -182,53 +180,8 @@ async function resolveCwd(ctx, exec, explicit) {
   throw new Error('cannot resolve the session directory; pass cwd explicitly')
 }
 
-function renderList() {
-  const graphs = listGraphs()
-  const usage = summarizeUsage()
-  const lines = ['# HarnessMM state', '']
-  if (graphs.length === 0) {
-    lines.push('No saved graphs. Author one and pass `save: true` with a `name`.')
-  } else {
-    lines.push('| name | nodes | saved | intent | description |')
-    lines.push('| --- | --- | --- | --- | --- |')
-    for (const graph of graphs) {
-      lines.push(
-        `| ${graph.name} | ${graph.nodes} | ${graph.savedAt ?? '—'} | ${graph.intent || '— (not suggestible)'} | ${graph.description || '—'} |`,
-      )
-    }
-  }
-  lines.push('')
-  lines.push('## Usage (last 200 calls)')
-  const tools = Object.entries(usage.byTool)
-  if (tools.length === 0) lines.push('No calls recorded yet.')
-  for (const [name, stats] of tools) {
-    lines.push(`- ${name}: ${stats.calls} call(s), last ${stats.lastAt}`)
-  }
-  if (usage.chainSteps > 0) {
-    lines.push(`- steps executed by chains: ${usage.chainSteps}, certificates: ${usage.certificates}`)
-  }
-  return lines.join('\n')
-}
-
-function normalizeReceipts(input) {
-  if (!Array.isArray(input)) throw new Error('receipts must be an array')
-  return input.map((receipt, index) => {
-    if (!receipt || typeof receipt !== 'object' || typeof receipt.stepId !== 'string') {
-      throw new Error(`receipts[${index}] needs a string stepId`)
-    }
-    return {
-      stepId: receipt.stepId,
-      action: receipt.action ?? 'shell',
-      args: receipt.args ?? {},
-      exitCode: Number(receipt.exitCode ?? 0),
-      stdout: String(receipt.stdout ?? ''),
-      stderr: String(receipt.stderr ?? ''),
-    }
-  })
-}
-
 const CHAIN_DESCRIPTION =
-  'Execute a plan without a reasoning call per step. Pass `steps` for the common case: a list of {run, expect}, where the first step needs no predecessor and each later step runs only when the previous step\'s expectation is proven by its receipt. For branching procedures, pass `graph` (EDG nodes with after/guard) instead — both compile to the same plan. A plan may start from nothing: the first step needs no predecessor and no receipt. Every later step runs only when its guard is proven by the receipt of the step before it: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns, with the full output of the failing step. Shell nodes run commands directly in the session directory, outside the bash sandbox, need allowShell: true, and are refused for destructive patterns. Graphs can be saved by name and re-run later; pass `receipts` from an earlier run to resume without re-executing finished nodes.'
+  'Execute a plan without a reasoning call per step. Pass `steps` for the common case: a list of {run, expect}, where the first step needs no predecessor and each later step runs only when the previous step\'s expectation is proven by its receipt. For branching procedures, pass `graph` (EDG nodes with after/guard) instead — both compile to the same plan.'
 
 function makeChainTool(ctx) {
   return {
@@ -246,32 +199,6 @@ function makeChainTool(ctx) {
           description:
             'Graph form, for branching procedures: {"nodes":[{"id","action":"write|shell","args","after","guard"}]}. Use this only when the plan is not a straight line.',
           type: ['object', 'string'],
-        },
-        name: {
-          description: 'Saved graph name: run it when `graph` is omitted, or store it when `save` is true.',
-          type: 'string',
-        },
-        save: {
-          description: 'Validate and store `graph` under `name` instead of running it.',
-          type: 'boolean',
-        },
-        solve: {
-          description:
-            'Natural-language request, e.g. "прогони проверки проекта" or "deploy the staging build". When `graph` and `name` are omitted, saved chains are matched against it by declared intent (never by exact phrasing) and the best match runs. A miss returns what was considered, so the chain can be authored instead.',
-          type: 'string',
-        },
-        intent: {
-          description:
-            'With `save: true`: what this chain is for, in a person\'s words ("проверить пакет: тесты и замер"). This is how a later `solve` finds it. A chain saved without intent can only be run by name.',
-          type: 'string',
-        },
-        description: {
-          description: 'One line describing a saved graph.',
-          type: 'string',
-        },
-        list: {
-          description: 'List saved graphs and usage counters instead of running anything.',
-          type: 'boolean',
         },
         receipts: {
           description: 'Receipts from an earlier run, to resume a graph that already executed those nodes.',
@@ -319,68 +246,14 @@ function makeChainTool(ctx) {
       render: (_args, value) => text(value.markdown),
     },
     async execute(args, exec) {
-      const mode = resolveMode(args)
+      resolveMode(args)
 
-      if (mode.kind === 'list') {
-        const markdown = renderList()
-        logUsage({ tool: 'harnessmm_chain', ...attribution(exec), mode: 'list' })
-        return { markdown, stopReason: 'listed', steps: 0, certificates: 0 }
-      }
-
-      let raw =
+      const raw =
         args.steps !== undefined
           ? { steps: Array.isArray(args.steps) ? args.steps : args.steps.steps ?? [] }
           : args.graph
             ? parseGraph(args.graph)
             : null
-      if (args.name && !isValidName(args.name)) {
-        throw new Error('graph name must match ^[a-z0-9][a-z0-9-]{0,62}$')
-      }
-      if (mode.kind === 'save') {
-        const compiled = compileGraph(raw, { rootId: args.rootId, priorIds: args.priorIds ?? [] })
-        if (!compiled.ok) throw new Error(`graph refused: ${compiled.errors.join('; ')}`)
-        const saved = saveGraph(args.name, raw, { description: args.description ?? '', intent: args.intent ?? '' })
-        logUsage({ tool: 'harnessmm_chain', ...attribution(exec), mode: 'save', name: args.name, nodes: compiled.graph.nodes.length, stamp: saved.stamp })
-        return {
-          markdown: `Saved graph "${args.name}" (${compiled.graph.nodes.length} nodes, stamp ${saved.stamp}) to ${saved.file}.\nRun it with harnessmm_chain { name: "${args.name}", allowShell: true }.`,
-          stopReason: 'saved',
-          steps: 0,
-          certificates: 0,
-        }
-      }
-      if (mode.kind === 'solve') {
-        const match = findReusableChain(args.solve, listGraphs(), {
-          minCoverage: 0.6,
-          minPrecision: 0.25,
-        })
-        logUsage({
-          tool: 'harnessmm_chain',
-          ...attribution(exec),
-          mode: 'solve',
-          hit: match ? match.name : null,
-          score: match ? match.score : null,
-        })
-        if (match === null) {
-          const available = listGraphs()
-          return {
-            markdown: [
-              `No saved chain matched: ${JSON.stringify(args.solve)}`,
-              available.length === 0
-                ? 'The library is empty.'
-                : `Saved chains: ${available.map((entry) => `${entry.name}${entry.intent ? ` (intent: ${entry.intent})` : ''}`).join('; ')}`,
-              'Author the graph and pass it as `graph`, or save it with an `intent` so later requests find it.',
-            ].join('\n'),
-            stopReason: 'no-match',
-            steps: 0,
-            certificates: 0,
-          }
-        }
-        raw = loadGraph(match.name)
-      }
-      if (mode.kind === 'named') {
-        raw = loadGraph(mode.name)
-      }
-
       const cwd = await resolveCwd(ctx, exec, args.cwd)
       const priorReceipts = args.receipts ? normalizeReceipts(args.receipts) : []
       const sandboxed = args.executor === 'sandboxed'
