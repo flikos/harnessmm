@@ -311,6 +311,8 @@ function makeChainTool(ctx) {
           stopReason: { type: 'string' },
           steps: { type: 'number' },
           certificates: { type: 'number' },
+          avoidedRoundTrips: { type: 'number' },
+          modelCallsBetweenSteps: { type: 'number' },
         },
         required: ['markdown', 'stopReason'],
       },
@@ -414,6 +416,8 @@ function makeChainTool(ctx) {
         stepMs: result.steps.map((step) => ({ id: step.id, ms: step.ms })),
         verdicts: (result.verdicts ?? []).map((reason) => ({ id: reason.id, state: reason.state })),
         failedStep: result.failedStep ?? null,
+        avoidedRoundTrips: result.avoidedRoundTrips,
+        modelCallsBetweenSteps: result.modelCallsBetweenSteps,
         savedMs: result.saved.estMs,
         savedTokens: result.saved.estTokens,
       })
@@ -425,6 +429,8 @@ function makeChainTool(ctx) {
         receipts: result.receipts,
         verdicts: result.verdicts ?? [],
         failedStep: result.failedStep ?? null,
+        avoidedRoundTrips: result.avoidedRoundTrips,
+        modelCallsBetweenSteps: result.modelCallsBetweenSteps,
         saved: result.saved,
       }
     },
