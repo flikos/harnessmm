@@ -401,7 +401,8 @@ function makeChainTool(ctx) {
         resumed: priorReceipts.length,
         execMs,
         stepMs: result.steps.map((step) => ({ id: step.id, ms: step.ms })),
-        deferReasons: (result.deferReasons ?? []).map((reason) => ({ id: reason.id, state: reason.state })),
+        verdicts: (result.verdicts ?? []).map((reason) => ({ id: reason.id, state: reason.state })),
+        failedStep: result.failedStep ?? null,
         savedMs: result.saved.estMs,
         savedTokens: result.saved.estTokens,
       })
@@ -411,7 +412,8 @@ function makeChainTool(ctx) {
         steps: result.steps.length,
         certificates: result.certificates,
         receipts: result.receipts,
-        deferReasons: result.deferReasons ?? [],
+        verdicts: result.verdicts ?? [],
+        failedStep: result.failedStep ?? null,
         saved: result.saved,
       }
     },

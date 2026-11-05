@@ -128,8 +128,8 @@ test('a deferred chain explains each pending node in report and result', async (
     cwd,
     execute: makeExecutor({ cwd, allowShell: true }),
   })
-  assert.equal(result.stopReason, 'deferred')
-  const states = Object.fromEntries(result.deferReasons.map((reason) => [reason.id, reason.state]))
+  assert.equal(result.stopReason, 'expectation-failed')
+  const states = Object.fromEntries(result.verdicts.map((reason) => [reason.id, reason.state]))
   assert.equal(states.s2, 'guard-negative')
   assert.equal(states.s3, 'waiting-for-predecessor')
   const report = renderChain(result)

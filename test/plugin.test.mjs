@@ -138,7 +138,7 @@ test('harnessmm_chain runs a graph in an explicit directory', async () => {
       ],
     },
   })
-  assert.equal(value.stopReason, 'completed')
+  assert.equal(value.stopReason, 'exhausted')
   assert.equal(value.steps, 2)
   assert.equal(value.certificates, 2)
   assert.ok(fs.existsSync(path.join(dir, 'second.txt')))
@@ -154,7 +154,7 @@ test('harnessmm_chain refuses shell nodes without allowShell', async () => {
     cwd: dir,
     graph: { nodes: [{ id: 's1', action: 'shell', args: { cmd: 'echo hi' } }] },
   })
-  assert.equal(value.stopReason, 'error')
+  assert.equal(value.stopReason, 'execution-error')
   assert.match(value.markdown, /allowShell/)
 })
 
@@ -177,6 +177,6 @@ test('harnessmm_chain saves a graph, lists it, and runs it by name', async () =>
   assert.match(listed.markdown, /Usage \(last 200 calls\)/)
 
   const run = await chain.execute({ name: 'smoke-write', cwd: dir })
-  assert.equal(run.stopReason, 'completed')
+  assert.equal(run.stopReason, 'exhausted')
   assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8'), 'hi')
 })

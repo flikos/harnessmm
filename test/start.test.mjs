@@ -71,7 +71,7 @@ test('a tool call with no root identifier of any kind executes the plan', async 
     },
     execute,
   })
-  assert.equal(result.stopReason, 'completed')
+  assert.equal(result.stopReason, 'exhausted')
   assert.deepEqual(executed, ['s1', 's2'])
 })
 

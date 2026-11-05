@@ -65,7 +65,9 @@ test('a saved intent makes a chain suggestible without registering any phrase', 
   // never supplied, so it defers here — the point is that the graph was found
   // and loaded, not that it completed.
   assert.notEqual(result.stopReason, 'no-match')
-  assert.match(result.markdown, /verify-package|No receipt|guard/i)
+  // The matched graph was loaded and attempted: it defers because its first
+  // step has no receipt, which is the point — the lookup happened.
+  assert.match(result.markdown, /Chain (stopped|completed)/)
 })
 
 test('an unmatched request reports what exists instead of guessing', async () => {

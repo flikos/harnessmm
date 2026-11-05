@@ -32,7 +32,7 @@ test('a chain runs write → compile → test with no reasoning call', async () 
     },
   ])
   const result = await runChain({ raw, cwd, execute: makeExecutor({ cwd, allowShell: true }) })
-  assert.equal(result.stopReason, 'completed')
+  assert.equal(result.stopReason, 'exhausted')
   assert.equal(result.steps.length, 3)
   assert.equal(result.certificates, 3)
   assert.equal(result.verified, 3)
@@ -53,8 +53,8 @@ test('a failing guard stops the chain and hands control back', async () => {
     },
   ])
   const result = await runChain({ raw, cwd, execute: makeExecutor({ cwd, allowShell: true }) })
-  assert.equal(result.stopReason, 'deferred')
-  assert.match(result.detail, /no eligible decision/)
+  assert.equal(result.stopReason, 'expectation-failed')
+  assert.equal(result.failedStep, 's2')
   assert.equal(result.steps.length, 1)
   assert.deepEqual(result.pending, ['s2'])
 })
@@ -63,7 +63,7 @@ test('shell nodes are refused unless the caller opts in', async () => {
   const cwd = workspace()
   const raw = graph([{ id: 's1', action: 'shell', args: { cmd: 'echo hi' } }])
   const result = await runChain({ raw, cwd, execute: makeExecutor({ cwd, allowShell: false }) })
-  assert.equal(result.stopReason, 'error')
+  assert.equal(result.stopReason, 'execution-error')
   assert.match(result.detail, /allowShell/)
   assert.equal(result.certificates, 0)
 })
@@ -72,7 +72,7 @@ test('write cannot escape the working directory', async () => {
   const cwd = workspace()
   const raw = graph([{ id: 's1', action: 'write', args: { path: '../escape.txt', content: 'x' } }])
   const result = await runChain({ raw, cwd, execute: makeExecutor({ cwd, allowShell: true }) })
-  assert.equal(result.stopReason, 'error')
+  assert.equal(result.stopReason, 'execution-error')
   assert.match(result.detail, /escapes the working directory/)
 })
 
@@ -100,7 +100,7 @@ test('a json_field guard reads a structured result and unlocks the next node', a
     },
   ])
   const result = await runChain({ raw, cwd, execute: makeExecutor({ cwd, allowShell: true }) })
-  assert.equal(result.stopReason, 'completed')
+  assert.equal(result.stopReason, 'exhausted')
   assert.equal(fs.readFileSync(path.join(cwd, 'accepted.txt'), 'utf8'), 'answer was 42\n')
 })
 
@@ -117,7 +117,7 @@ test('a json_field guard on the wrong value stops before the dependent node', as
     },
   ])
   const result = await runChain({ raw, cwd, execute: makeExecutor({ cwd, allowShell: true }) })
-  assert.equal(result.stopReason, 'deferred')
+  assert.equal(result.stopReason, 'expectation-failed')
   assert.equal(fs.existsSync(path.join(cwd, 'accepted.txt')), false)
 })
 
@@ -140,7 +140,7 @@ test('a stalled chain shows the full output of the failing step', async () => {
     { id: 's2', action: 'shell', args: { cmd: 'echo never' }, after: 's1', guard: { op: 'exit_code', of: 's1', eq: 0 } },
   ])
   const result = await runChain({ raw, cwd, execute: makeExecutor({ cwd, allowShell: true }) })
-  assert.equal(result.stopReason, 'deferred')
+  assert.equal(result.stopReason, 'expectation-failed')
   const report = renderChain(result)
   assert.equal(report.includes('x'.repeat(2500)), true, 'failing output must not be truncated to a table cell')
 })
@@ -156,7 +156,7 @@ test('a chain resumes from receipts without re-running finished nodes', async ()
     cwd,
     execute: makeExecutor({ cwd, allowShell: true }),
   })
-  assert.equal(first.stopReason, 'deferred')
+  assert.equal(first.stopReason, 'expectation-failed')
   assert.deepEqual(first.pending, ['s3'])
 
   const second = await runChain({
@@ -168,7 +168,7 @@ test('a chain resumes from receipts without re-running finished nodes', async ()
     priorReceipts: first.receipts,
     execute: makeExecutor({ cwd, allowShell: true }),
   })
-  assert.equal(second.stopReason, 'completed')
+  assert.equal(second.stopReason, 'exhausted')
   assert.equal(second.steps.length, 1, 'only the remaining node runs')
   assert.match(second.steps[0].stdout, /recovered/)
 })
@@ -180,7 +180,7 @@ test('destructive commands are refused before they run', async () => {
     cwd,
     execute: makeExecutor({ cwd, allowShell: true }),
   })
-  assert.equal(result.stopReason, 'error')
+  assert.equal(result.stopReason, 'execution-error')
   assert.match(result.detail, /refused command/)
 })
 
@@ -240,7 +240,7 @@ test('a stopped chain prints receipts that can be passed back to resume', async 
     priorReceipts: receipts,
     execute: makeExecutor({ cwd, allowShell: true }),
   })
-  assert.equal(second.stopReason, 'completed')
+  assert.equal(second.stopReason, 'exhausted')
   assert.equal(second.steps.length, 1)
 })
 
@@ -267,7 +267,7 @@ test('the sandboxed executor reads a structured bash result', async () => {
     cwd,
     execute: makeSandboxExecutor({ dispatch, cwd }),
   })
-  assert.equal(result.stopReason, 'completed')
+  assert.equal(result.stopReason, 'exhausted')
   assert.equal(result.steps[0].exitCode, 0)
   assert.match(result.steps[0].stdout, /sandbox ok/)
   assert.equal(calls.length, 1)
@@ -291,7 +291,7 @@ test('the sandboxed executor falls back to the exit-code marker in text', async 
     execute: makeSandboxExecutor({ dispatch, cwd }),
   })
   assert.equal(result.steps[0].exitCode, 3)
-  assert.equal(result.stopReason, 'deferred')
+  assert.equal(result.stopReason, 'expectation-failed')
 })
 
 test('the sandboxed executor fails closed on an unparsable result', async () => {
@@ -302,7 +302,7 @@ test('the sandboxed executor fails closed on an unparsable result', async () => 
     cwd,
     execute: makeSandboxExecutor({ dispatch, cwd }),
   })
-  assert.equal(result.stopReason, 'error')
+  assert.equal(result.stopReason, 'execution-error')
   assert.match(result.detail, /cannot determine an exit code/)
 })
 
@@ -314,7 +314,7 @@ test('the denylist also applies to the sandboxed executor', async () => {
     cwd,
     execute: makeSandboxExecutor({ dispatch, cwd }),
   })
-  assert.equal(result.stopReason, 'error')
+  assert.equal(result.stopReason, 'execution-error')
   assert.match(result.detail, /refused command/)
   assert.equal(calls.length, 0, 'a refused command must never reach dispatch')
 })
@@ -327,7 +327,7 @@ test('sandboxed write nodes stay direct and do not dispatch', async () => {
     cwd,
     execute: makeSandboxExecutor({ dispatch, cwd }),
   })
-  assert.equal(result.stopReason, 'completed')
+  assert.equal(result.stopReason, 'exhausted')
   assert.equal(calls.length, 0)
   assert.equal(fs.readFileSync(path.join(cwd, 'a.txt'), 'utf8'), 'x')
 })
