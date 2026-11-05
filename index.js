@@ -228,7 +228,7 @@ function normalizeReceipts(input) {
 }
 
 const CHAIN_DESCRIPTION =
-  'Execute a decision graph without a reasoning call per step. A plan may start from nothing: the first step needs no predecessor and no receipt. Every later step runs only when its guard is proven by the receipt of the step before it: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns, with the full output of the failing step. Shell nodes run commands directly in the session directory, outside the bash sandbox, need allowShell: true, and are refused for destructive patterns. Graphs can be saved by name and re-run later; pass `receipts` from an earlier run to resume without re-executing finished nodes.'
+  'Execute a plan without a reasoning call per step. Pass `steps` for the common case: a list of {run, expect}, where the first step needs no predecessor and each later step runs only when the previous step\'s expectation is proven by its receipt. For branching procedures, pass `graph` (EDG nodes with after/guard) instead — both compile to the same plan. A plan may start from nothing: the first step needs no predecessor and no receipt. Every later step runs only when its guard is proven by the receipt of the step before it: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns, with the full output of the failing step. Shell nodes run commands directly in the session directory, outside the bash sandbox, need allowShell: true, and are refused for destructive patterns. Graphs can be saved by name and re-run later; pass `receipts` from an earlier run to resume without re-executing finished nodes.'
 
 function makeChainTool(ctx) {
   return {
@@ -237,8 +237,14 @@ function makeChainTool(ctx) {
     parameters: {
       type: 'object',
       properties: {
+        steps: {
+          description:
+            'Linear plan: [{"run":{"cmd":"..."},"expect":{"op":"exit_code","eq":0}}]. The first step has no predecessor and no expectation; a later step\'s expect defaults to reading the step above it. Omit expect when a step needs no gate.',
+          type: ['array', 'object'],
+        },
         graph: {
-          description: 'EDG document: {"nodes":[{"id","action":"write|shell","args","after","guard"}]}',
+          description:
+            'Graph form, for branching procedures: {"nodes":[{"id","action":"write|shell","args","after","guard"}]}. Use this only when the plan is not a straight line.',
           type: ['object', 'string'],
         },
         name: {
@@ -319,7 +325,12 @@ function makeChainTool(ctx) {
         return { markdown, stopReason: 'listed', steps: 0, certificates: 0 }
       }
 
-      let raw = args.graph ? parseGraph(args.graph) : null
+      let raw =
+        args.steps !== undefined
+          ? { steps: Array.isArray(args.steps) ? args.steps : args.steps.steps ?? [] }
+          : args.graph
+            ? parseGraph(args.graph)
+            : null
       if (args.name && !isValidName(args.name)) {
         throw new Error('graph name must match ^[a-z0-9][a-z0-9-]{0,62}$')
       }
