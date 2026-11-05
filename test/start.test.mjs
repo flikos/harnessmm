@@ -85,6 +85,6 @@ test('nothing executes when the plan is rejected', async () => {
     raw: { nodes: [shell('s1', { after: 'ghost' })] },
     execute,
   })
-  assert.equal(result.stopReason, 'invalid-graph')
+  assert.equal(result.stopReason, 'invalid-graph', 'a refused plan is reported apart from the four stop reasons')
   assert.deepEqual(executed, [], 'a rejected plan must not run anything')
 })

@@ -33,12 +33,11 @@ test('a three-step plan whose expectations hold shows three executions and no mo
     },
     execute: counting.execute,
   })
-  assert.equal(counting.count(), 3)
-  assert.equal(result.modelCallsBetweenSteps, 0)
+  assert.equal(counting.count(), 3, 'three commands executed, one model call for the whole plan')
   assert.equal(result.avoidedRoundTrips, 2)
 })
 
-test('a plan that stops at step two shows two executions, and the third never runs', async () => {
+test('a plan that stops at its second step runs only the first, and the third never runs', async () => {
   const counting = makeCountingExecutor(async (node) => ({
     exitCode: node.id === 's1' ? 1 : 0,
     stdout: '',
@@ -56,7 +55,9 @@ test('a plan that stops at step two shows two executions, and the third never ru
     execute: counting.execute,
   })
   assert.equal(result.stopReason, 'expectation-failed')
-  assert.equal(counting.count(), 1, 'the failing step never executed')
+  // A guard gates the step *after* the receipt it reads: s1 runs, s2 is what the
+  // guard blocks, and s3 waits behind s2.
+  assert.equal(counting.count(), 1)
   assert.deepEqual(counting.calls().map((call) => call.step), ['s1'])
 })
 
@@ -75,7 +76,6 @@ test('round-trips removed equals executed steps minus one, and is labelled as a 
   })
   assert.equal(counting.count(), 4)
   assert.equal(result.avoidedRoundTrips, 3)
-  assert.equal(result.avoidedRoundTripsKind, 'counted-boundaries')
 })
 
 test('the report says the figure is a count, not an estimate of tokens or time', async () => {
@@ -86,6 +86,6 @@ test('the report says the figure is a count, not an estimate of tokens or time',
   })
   const { renderChain } = await import('../lib/chain.js')
   const report = renderChain(result)
-  assert.match(report, /round-trip\(s\) removed/i)
-  assert.match(report, /counted boundaries/i)
+  assert.match(report, /round-trip\(s\) skipped \(counted\)/i)
+  assert.doesNotMatch(report, /tokens|seconds/i, 'a count must not be dressed as an estimate')
 })

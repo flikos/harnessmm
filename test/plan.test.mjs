@@ -28,7 +28,7 @@ test('a linear plan and the equivalent graph produce the same plan hash', () => 
   const fromLinear = compilePlan(linear)
   const fromGraph = compilePlan({
     nodes: [
-      { id: 's1', action: 'shell', args: { cmd: 'npm run build' }, guard: null },
+      { id: 's1', action: 'shell', args: { cmd: 'npm run build' } },
       {
         id: 's2',
         action: 'shell',
@@ -149,4 +149,24 @@ test('the tool accepts the linear form through its own entry point', async () =>
   // execution error rather than a plan-invalid one: the plan itself was accepted.
   assert.equal(result.stopReason, 'execution-error')
   assert.match(result.markdown, /s1/)
+})
+
+test('the linear form runs through the direct executor too', async () => {
+  const { makeExecutor } = await import('../lib/chain.js')
+  const cwd = (await import('node:fs')).mkdtempSync(
+    (await import('node:path')).join((await import('node:os')).tmpdir(), 'harnessmm-linear-'),
+  )
+  const result = await runChain({
+    raw: { steps: [{ run: { cmd: 'echo one' } }, { run: { cmd: 'echo two' }, expect: { op: 'stdout_contains', text: 'one' } }] },
+    cwd,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  assert.equal(result.stopReason, 'exhausted', JSON.stringify(result.failure))
+  assert.equal(result.steps.length, 2)
+})
+
+test('the graph vocabulary in a linear plan is refused, not silently dropped', () => {
+  const compiled = compilePlan({ steps: [{ run: { cmd: 'a' } }, { run: { cmd: 'b' }, guard: { op: 'exit_code', eq: 0 } }] })
+  assert.equal(compiled.ok, false)
+  assert.ok(compiled.errors.some((error) => error.includes('expect')), compiled.errors.join('; '))
 })

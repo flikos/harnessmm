@@ -239,7 +239,6 @@ function makeChainTool(ctx) {
           steps: { type: 'number' },
           certificates: { type: 'number' },
           avoidedRoundTrips: { type: 'number' },
-          modelCallsBetweenSteps: { type: 'number' },
         },
         required: ['markdown', 'stopReason'],
       },
@@ -255,7 +254,7 @@ function makeChainTool(ctx) {
             ? parseGraph(args.graph)
             : null
       const cwd = await resolveCwd(ctx, exec, args.cwd)
-      const priorReceipts = args.receipts ? normalizeReceipts(args.receipts) : []
+      const priorReceipts = Array.isArray(args.receipts) ? args.receipts.filter((receipt) => receipt && typeof receipt.stepId === 'string') : []
       const sandboxed = args.executor === 'sandboxed'
       const execute = sandboxed
         ? makeSandboxExecutor({
@@ -277,7 +276,6 @@ function makeChainTool(ctx) {
       logUsage({
         tool: 'harnessmm_chain',
         ...attribution(exec),
-        name: args.name ?? null,
         mode: 'run',
         steps: result.steps.length,
         stopReason: result.stopReason,
@@ -290,9 +288,7 @@ function makeChainTool(ctx) {
         verdicts: (result.verdicts ?? []).map((reason) => ({ id: reason.id, state: reason.state })),
         failedStep: result.failedStep ?? null,
         avoidedRoundTrips: result.avoidedRoundTrips,
-        modelCallsBetweenSteps: result.modelCallsBetweenSteps,
-        savedMs: result.saved.estMs,
-        savedTokens: result.saved.estTokens,
+
       })
       return {
         markdown: renderChain(result),
@@ -303,7 +299,6 @@ function makeChainTool(ctx) {
         verdicts: result.verdicts ?? [],
         failedStep: result.failedStep ?? null,
         avoidedRoundTrips: result.avoidedRoundTrips,
-        modelCallsBetweenSteps: result.modelCallsBetweenSteps,
         saved: result.saved,
       }
     },

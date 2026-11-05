@@ -1,19 +1,15 @@
 # Quickstart
 
-Two minutes to know what this plugin does and how to drive it. Details and measurements:
-[README](../README.md); one measured case: [benefit-report](benefit-report.md).
+Two minutes to know what the plugin does and how to drive it. Design and measurements:
+[README](../README.md).
 
 ## What it does
 
-Guarded decision reuse from [HarnessMM (arXiv:2610.32813)](https://arxiv.org/abs/2610.32813):
+You ask for work. The model plans it, and part of the plan is mechanical: run a command, check the
+result, run the next one. `harnessmm_chain` runs that part in a single call — no model round-trip
+between steps. It stops the moment reality disagrees and hands back what it saw.
 
-**`harnessmm_chain` — run a decided plan without re-deciding.** You hand it a graph of mechanical
-steps; it runs them in order, and between nodes the model is not called at all. Each step is gated by
-evidence from the previous one (exit code, file existence, JSON field), so a failed step stops the
-chain instead of being papered over. A chain saved with an `intent` is found later by *your* wording,
-so the second run costs neither authoring nor a phrase registry.
-
-It does not decide anything for you, does not infer new decisions, and does not touch the model loop.
+Nothing is registered or saved beforehand. The plan is stated in the call, every time.
 
 ## Install
 
@@ -29,94 +25,92 @@ dsh plugin --profile <profile> add /absolute/path/to/harnessmm
 
 Source changes under `lib/` reach a running Host only after `remove_bundle` + `install_bundle`.
 
-## Use the chain
-
-Reach for it when a task is **≥3 mechanical steps whose readiness is observable** — build → test →
-lint → format → commit, or the same sequence over many files. Do not reach for it when the next step
-depends on what the output *means*, or when there are one or two steps.
-
-```json
-{"nodes": [
-  {"id": "s2", "action": "shell", "args": {"cmd": "node --test test/*.test.mjs"}, "after": "s1",
-   "guard": {"op": "exit_code", "of": "s1", "eq": 0}},
-  {"id": "s3", "action": "shell", "args": {"cmd": "node bin/bench.mjs"}, "after": "s2",
-   "guard": {"op": "json_field", "of": "s2", "field": "ok", "eq": true}}
-]}
-```
-
-Guard operators: `exists`, `exit_code`, `stdout_contains`, `stderr_contains`, `file_exists`,
-`file_contains`, `json_field` (with `field` plus `exists` / `eq` / `ne`), and the combinators `all`,
-`any`, `not`. An unreadable receipt is not treated as a failure — it is reported as unknown and stops
-the chain with `deferred`.
-
-Call it with the graph and a `rootId` for the step you already ran yourself:
+## The common case
 
 ```
-harnessmm_chain(graph: {...}, rootId: "s1")
-harnessmm_chain(solve: "прогони тесты и замер для пакета", rootId: "s1")   # reuse a saved chain
+harnessmm_chain { steps: [
+  { run: { cmd: "npm run build" } },
+  { run: { cmd: "npm test" },  expect: { op: "exit_code", eq: 0 } },
+  { run: { cmd: "npm run lint" }, expect: { op: "exit_code", eq: 0 } }
+], executor: "sandboxed" }
 ```
 
-What comes back: `markdown` (what ran, what it proved), `stopReason` (`completed` or `deferred`),
-`certificates` (how many guards were actually proven), `receipts`, and `deferReasons` naming the node
-that stopped the chain and why. Feed `receipts` back in a later call to resume: finished nodes are not
-re-run.
+- The **first step** has no predecessor and no expectation — a plan starts from nothing.
+- Every later step runs only when the step above produced what `expect` describes.
+- `expect` reads the step above by default; that is why it does not repeat the id.
 
-Choices worth knowing:
+What comes back:
 
-| argument | default | meaning |
+```
+Chain completed: 3 step(s), 2 model round-trip(s) skipped (counted)
+```
+
+Two steps ran without asking you or the model anything; the figure says how many boundaries were
+crossed, nothing about tokens or time.
+
+## When a step disagrees
+
+| status | meaning | what you get |
 | --- | --- | --- |
-| `executor` | `direct` | `sandboxed` runs shell through the native bash tool and inherits its sandbox and permissions |
-| `allowShell` | `false` | required for `direct`; runs in the Host process, outside the bash sandbox |
-| `name` + `save` | — | store the graph under a name instead of running it |
-| `name` alone | — | run a saved graph; every save keeps a versioned copy |
-| `list` | — | show saved graphs and how often each was used |
-| `maxSteps` | `20` | hard cap on executed nodes |
+| `exhausted` | everything ran | the step table |
+| `expectation-failed` | the previous step produced something else | the failing step's full output |
+| `evidence-unreadable` | the expected fact was not in the output | the step, and which fact was missing |
+| `execution-error` | the command could not run | the error |
 
-## Let the model find the chain itself
+Steps after the stopping one do not run.
 
-You do not register phrases and you do not have to remember commands. A saved chain states what it
-is for, and the request you write in your own words is matched against that:
+## Expectations you can write
 
-```
-harnessmm_chain { solve: "прогони тесты и замер для пакета", rootId: "s1" }
-```
+`exit_code`, `stdout_contains`, `stderr_contains`, `file_exists`, `file_contains`, `json_field`
+(with `field` plus `exists`/`eq`/`ne`), `exists`, and the combinators `all`, `any`, `not`.
 
-That is the model's job to issue — you just ask for the work. What you may want to do by hand is
-*have* a library worth matching, which means saving chains with an `intent`:
+Two rules that matter:
+
+- An argument must be a **literal**. `deploy $TARGET` is rejected: an unresolved value means the step
+  still depends on future reasoning, which is what this tool exists to avoid.
+- A guard proves its own condition, not correctness. "The build exited 0" is not "the program works".
+
+## Choosing the executor
+
+| executor | what runs | when |
+| --- | --- | --- |
+| `sandboxed` (prefer) | the native bash tool — its sandbox, policy and approvals apply | almost always |
+| `direct` | the Host process, outside the bash sandbox; needs `allowShell: true` | trusted mechanical commands only |
+
+Both refuse a short list of destructive patterns. The list is defence in depth, not a sandbox.
+
+## Branching plans
+
+When the plan is not a straight line, pass `graph` instead:
 
 ```json
-{"graph": {...}, "save": true, "name": "verify-package",
- "intent": "проверить пакет: тесты и замер",
- "description": "test suite, then the lab benchmark", "rootId": "s1"}
+{ "nodes": [
+   {"id": "a", "action": "shell", "args": {"cmd": "make build"}},
+   {"id": "b", "action": "shell", "args": {"cmd": "make test"}, "after": "a",
+    "guard": {"op": "exit_code", "of": "a", "eq": 0},
+    "required_receipt_fields": ["exitCode"]}
+] }
 ```
 
-`intent` is the only registration this plugin has. A chain saved without it runs by name and is
-never suggested — that is intentional, not an oversight.
-
-Matching rules worth knowing:
-
-- Words are stemmed and stopwords dropped, so `тесты`, `тест` and `тестов` are one term, and
-  `проверь`/`посмотри`/`сделай` are ignored as ways of asking rather than things asked for.
-- A chain's `intent` must therefore describe **what it does**, not how someone phrases the request.
-- Coverage decides: one shared vague word cannot claim a chain. A request that asks for the chain's
-  work plus three other things still matches.
+Both forms compile to the same plan; a guard means the same thing either way.
 
 ## Check what actually happened
 
 Every call appends one line to `~/.harnessmm/usage/usage.jsonl` (override `HARNESSMM_USAGE_DIR`):
-tool, stop reason, certificates, executor, per-node timings, defer reasons, and the
-caller's `session`. Saved graphs live in `~/.harnessmm/graphs`.
+status, steps, certificates, executor, per-step timings, the failing step and
+`avoidedRoundTrips` — the number of model boundaries crossed without a call, counted, not estimated.
+
+## Checking a plan before running it
 
 ```
-node --test test/*.test.mjs          # 68 tests
-node bin/bench.mjs [--tasks add,roman] [--json]
+harnessmm_validate { graph: {...} }
 ```
+
+Rejects literal placeholders, unknown predecessors, cycles and guards reading fields they did not
+declare. A rejected plan executes nothing.
 
 ## Boundaries
 
-- Guards prove their own condition, not that the program is right.
-- Benchmark token numbers are `characters / 4` estimates over exact prompt strings, not tokenizer
-  counts and not claims about model quality.
-- Substitution fires only where someone registered a decision; how often that happens in real work
-  is unmeasured.
-- `allowShell` and `denylist` are defence in depth, not a sandbox.
+- The tool removes round-trips inside a plan; it does not decide the plan.
+- It never touches the model stream.
+- Benchmark token numbers in `harnessmm_bench` are `characters / 4` estimates, not tokenizer counts.

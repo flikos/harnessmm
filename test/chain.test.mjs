@@ -196,7 +196,7 @@ test('a node can carry its own timeout', async () => {
   assert.notEqual(result.steps[0].exitCode, 0)
 })
 
-test('the result reports the calls a chain avoided', async () => {
+test('the result reports the round-trips the plan skipped, and nothing it would have cost', async () => {
   const cwd = workspace()
   const result = await runChain({
     raw: graph([
@@ -206,12 +206,12 @@ test('the result reports the calls a chain avoided', async () => {
     cwd,
     execute: makeExecutor({ cwd, allowShell: true }),
   })
+  assert.equal(result.avoidedRoundTrips, 1)
   assert.equal(result.saved.avoidedCalls, 2)
-  assert.ok(result.saved.estTokens > 0)
+  assert.equal('estTokens' in result.saved, false, 'a token figure would be a model, not a measurement')
   const report = renderChain(result)
-  assert.match(report, /Substitutions: 2 \(measured\)/)
-  assert.match(report, /constant model/)
-  assert.equal(report.includes('Saved (estimate)'), false, 'no estimate may read as a measured saving')
+  assert.match(report, /1 model round-trip\(s\) skipped \(counted\)/)
+  assert.equal(report.includes('constant model'), false)
 })
 
 test('a stopped chain prints receipts that can be passed back to resume', async () => {

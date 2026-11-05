@@ -115,7 +115,7 @@ test('chain commands never see credential-shaped environment variables', async (
   delete process.env.HARNESSMM_TEST_SECRET_TOKEN
 })
 
-test('a deferred chain explains each pending node in report and result', async () => {
+test('a stopped chain explains each pending node in report and result', async () => {
   const cwd = workspace()
   const result = await runChain({
     raw: {
