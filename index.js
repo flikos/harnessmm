@@ -228,7 +228,7 @@ function normalizeReceipts(input) {
 }
 
 const CHAIN_DESCRIPTION =
-  'Execute a pre-authored decision graph without a reasoning call per step: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns, with the full output of the failing step. Shell nodes run commands directly in the session directory, outside the bash sandbox, need allowShell: true, and are refused for destructive patterns. Graphs can be saved by name and re-run later; pass `receipts` from an earlier run to resume without re-executing finished nodes.'
+  'Execute a decision graph without a reasoning call per step. A plan may start from nothing: the first step needs no predecessor and no receipt. Every later step runs only when its guard is proven by the receipt of the step before it: a node runs only when its guard is proven by receipts already observed (exit code, file content, JSON field). Stops and reports where control returns, with the full output of the failing step. Shell nodes run commands directly in the session directory, outside the bash sandbox, need allowShell: true, and are refused for destructive patterns. Graphs can be saved by name and re-run later; pass `receipts` from an earlier run to resume without re-executing finished nodes.'
 
 function makeChainTool(ctx) {
   return {
@@ -273,7 +273,8 @@ function makeChainTool(ctx) {
           items: { type: 'object', additionalProperties: true },
         },
         rootId: {
-          description: 'Receipt id of a step that already ran, when the graph continues after it.',
+          description:
+            'Optional. Receipt id of a step that already ran, when this plan continues after work done outside it. A plan that starts from nothing needs no root.',
           type: 'string',
         },
         cwd: {
