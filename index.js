@@ -8,20 +8,50 @@ import { logUsage } from './lib/usage.js'
 import { runChain, makeExecutor, makeSandboxExecutor, renderChain } from './lib/chain.js'
 import { saveGraph, loadGraph, listGraphs, isValidName } from './lib/library.js'
 import { summarizeUsage } from './lib/usage.js'
+import {
+  commitSubstitution,
+  createSubstitutionState,
+  decideSubstitution,
+  decisionsFile,
+  readDecisions,
+  synthesizedChunks,
+} from './lib/substitution.js'
 
 /**
- * HarnessMM Lab: two tools.
+ * HarnessMM Lab: three tools.
  *  - harnessmm_validate checks an Executable Decision Graph against literal
  *    closure and causal-dependency rules before anyone trusts it.
  *  - harnessmm_bench runs the same task set through the baseline and the
  *    guarded-reuse arm and returns measured token accounting.
- * The installed plugin does not intercept this session's model loop: DSH has no
- * hook that can skip a reasoning call, so substitution is exercised in-process
- * by the benchmark instead of silently rewriting the live agent.
+ *  - harnessmm_chain executes a saved or inline graph and reports receipts.
+ * The tools never touch this session's model loop; boundary substitution rides
+ * on the `llm/stream` waterfall and is wired only when a profile enables it
+ * (`wireSubstitution`). See docs/quickstart.md for the opt-in and its measured
+ * effect.
  */
 export const inject = ['tools']
 
 const text = (value) => [{ type: 'text', text: value }]
+
+/**
+ * Short, stable caller id. A ledger without it cannot answer the question it
+ * exists for: a maintainer's own smoke test reads exactly like real work.
+ *
+ * Session ids are branded `session-<uuid>`: keeping the prefix would spend the
+ * whole budget on `session-` and make every caller look identical. The profile
+ * is deliberately not recorded — the Host inherits ambient environment, so a run
+ * inside one profile can report another profile's name, and a lying field is
+ * worse than an absent one.
+ */
+function shortSession(value) {
+  if (value === null || value === undefined) return null
+  const text = String(value).replace(/^session-/, '')
+  return text === '' ? null : text.slice(0, 8)
+}
+
+function attribution(exec) {
+  return { session: shortSession(exec?.agent?.session?.id ?? null) }
+}
 
 function parseGraph(input) {
   if (input && typeof input === 'object') return input
@@ -70,7 +100,7 @@ const validateTool = {
         : `EDG rejected by ${value.errors.length} check(s):\n- ${value.errors.join('\n- ')}`,
     ),
   },
-  async execute(args) {
+  async execute(args, exec) {
     const compiled = compileGraph(parseGraph(args.graph), {
       rootId: args.rootId,
       priorIds: args.priorIds ?? [],
@@ -78,7 +108,7 @@ const validateTool = {
     const value = compiled.ok
       ? { ok: true, errors: [], nodes: compiled.graph.nodes.length, hash: compiled.graph.hash }
       : { ok: false, errors: compiled.errors, nodes: 0, hash: '' }
-    logUsage({ tool: 'harnessmm_validate', ok: value.ok, nodes: value.nodes, errors: value.errors })
+    logUsage({ tool: 'harnessmm_validate', ...attribution(exec), ok: value.ok, nodes: value.nodes, errors: value.errors })
     return value
   },
 }
@@ -116,7 +146,7 @@ const benchTool = {
     },
     render: (_args, value) => text(value.markdown),
   },
-  async execute(args) {
+  async execute(args, exec) {
     const taskIds = args.tasks ?? []
     const unknown = taskIds.filter((id) => !TASKS.some((task) => task.id === id))
     if (unknown.length > 0) throw new Error(`unknown task ids: ${unknown.join(', ')}`)
@@ -133,6 +163,7 @@ const benchTool = {
     }
     logUsage({
       tool: 'harnessmm_bench',
+      ...attribution(exec),
       tasks: taskIds.length ? taskIds : TASKS.map((task) => task.id),
       selector: result.selector,
       calls: result.summary.harness.actorCalls,
@@ -273,7 +304,7 @@ function makeChainTool(ctx) {
     async execute(args, exec) {
       if (args.list === true) {
         const markdown = renderList()
-        logUsage({ tool: 'harnessmm_chain', mode: 'list' })
+        logUsage({ tool: 'harnessmm_chain', ...attribution(exec), mode: 'list' })
         return { markdown, stopReason: 'listed', steps: 0, certificates: 0 }
       }
 
@@ -287,7 +318,7 @@ function makeChainTool(ctx) {
         const compiled = compileGraph(raw, {})
         if (!compiled.ok) throw new Error(`graph refused: ${compiled.errors.join('; ')}`)
         const saved = saveGraph(args.name, raw, { description: args.description ?? '' })
-        logUsage({ tool: 'harnessmm_chain', mode: 'save', name: args.name, nodes: compiled.graph.nodes.length, stamp: saved.stamp })
+        logUsage({ tool: 'harnessmm_chain', ...attribution(exec), mode: 'save', name: args.name, nodes: compiled.graph.nodes.length, stamp: saved.stamp })
         return {
           markdown: `Saved graph "${args.name}" (${compiled.graph.nodes.length} nodes, stamp ${saved.stamp}) to ${saved.file}.\nRun it with harnessmm_chain { name: "${args.name}", allowShell: true }.`,
           stopReason: 'saved',
@@ -322,6 +353,7 @@ function makeChainTool(ctx) {
       const execMs = Date.now() - started
       logUsage({
         tool: 'harnessmm_chain',
+        ...attribution(exec),
         name: args.name ?? null,
         steps: result.steps.length,
         stopReason: result.stopReason,
@@ -348,8 +380,51 @@ function makeChainTool(ctx) {
   }
 }
 
-export function apply(ctx) {
+/**
+ * Wire boundary substitution into this session's model loop.
+ *
+ * Off unless the profile enables it: the listener replaces a whole model turn,
+ * so it must never be an accident of installing the plugin. Every refusal —
+ * internal call, unmatched request, exhausted budget, malformed decision — is a
+ * plain `next()`, so the model answers exactly as before.
+ */
+function wireSubstitution(ctx, config) {
+  const settings = config?.substitution ?? {}
+  if (settings.enabled !== true) return
+
+  const file = decisionsFile(settings)
+  const decisions = readDecisions(file)
+  if (decisions.length === 0) {
+    logUsage({ tool: 'llm/stream', mode: 'mount', enabled: true, decisions: 0, file })
+    return
+  }
+
+  const state = createSubstitutionState(decisions)
+  logUsage({ tool: 'llm/stream', mode: 'mount', enabled: true, decisions: decisions.length, file })
+
+  ctx.effect(() => ctx.on('llm/stream', async function* (options, next) {
+    const hit = decideSubstitution(options, { ...state, config: settings })
+    if (hit === null) {
+      yield* next()
+      return
+    }
+    commitSubstitution(state, hit)
+    logUsage({
+      tool: 'llm/stream',
+      mode: 'substitution',
+      session: shortSession(hit.session),
+      fingerprint: hit.fingerprint,
+      decision: hit.decision.id ?? null,
+      calls: hit.decision.tool,
+      purpose: options.purpose ?? null,
+    })
+    for (const chunk of synthesizedChunks(hit.decision)) yield chunk
+  }))
+}
+
+export function apply(ctx, config = {}) {
   ctx.effect(() => ctx.tools.register(validateTool))
   ctx.effect(() => ctx.tools.register(benchTool))
   ctx.effect(() => ctx.tools.register(makeChainTool(ctx)))
+  wireSubstitution(ctx, config)
 }

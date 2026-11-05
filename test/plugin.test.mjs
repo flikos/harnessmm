@@ -71,6 +71,22 @@ test('harnessmm_validate accepts a closed graph and rejects a placeholder', asyn
   assert.match(validate.output.render({}, rejected)[0].text, /rejected/)
 })
 
+test('the usage ledger records who called the tool', async () => {
+  const ctx = fakeContext()
+  apply(ctx)
+  const validate = ctx.defs.get('harnessmm_validate')
+  await validate.execute(
+    { graph: { nodes: [] }, rootId: 's1' },
+    { agent: { session: { id: 'session-abcdef123456' } } },
+  )
+
+  const lines = fs.readFileSync(path.join(TEST_USAGE_DIR, 'usage.jsonl'), 'utf8').trim().split('\n')
+  const entry = JSON.parse(lines.at(-1))
+  assert.equal(entry.tool, 'harnessmm_validate')
+  assert.equal(entry.session, 'abcdef12')
+  assert.equal('profile' in entry, false, 'the profile is not recorded: ambient env can name another profile')
+})
+
 test('harnessmm_bench returns a report with fewer calls in the harness arm', async () => {
   const ctx = fakeContext()
   apply(ctx)
