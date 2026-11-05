@@ -5,19 +5,15 @@ Two minutes to know what this plugin does and how to drive it. Details and measu
 
 ## What it does
 
-Two mechanisms from [HarnessMM (arXiv:2610.32813)](https://arxiv.org/abs/2610.32813), one explicit
-and one opt-in:
+Guarded decision reuse from [HarnessMM (arXiv:2610.32813)](https://arxiv.org/abs/2610.32813):
 
-1. **`harnessmm_chain` — run a decided plan without re-deciding.** You hand it a graph of mechanical
-   steps; it runs them in order, and between nodes the model is not called at all. Each step is gated
-   by evidence from the previous one (exit code, file existence, JSON field), so a failed step stops
-   the chain instead of being papered over.
-2. **Boundary substitution — skip the model call that decides.** Off by default. When a stored
-   decision matches the incoming request, the plugin answers the model stream with that decision's
-   tool call, and the loop executes it. Measured: 3 model calls → 2 for the same task.
+**`harnessmm_chain` — run a decided plan without re-deciding.** You hand it a graph of mechanical
+steps; it runs them in order, and between nodes the model is not called at all. Each step is gated by
+evidence from the previous one (exit code, file existence, JSON field), so a failed step stops the
+chain instead of being papered over. A chain saved with an `intent` is found later by *your* wording,
+so the second run costs neither authoring nor a phrase registry.
 
-It does not decide anything for you, does not infer new decisions, and does not touch the model loop
-unless you turn substitution on.
+It does not decide anything for you, does not infer new decisions, and does not touch the model loop.
 
 ## Install
 
@@ -57,6 +53,7 @@ Call it with the graph and a `rootId` for the step you already ran yourself:
 
 ```
 harnessmm_chain(graph: {...}, rootId: "s1")
+harnessmm_chain(solve: "прогони тесты и замер для пакета", rootId: "s1")   # reuse a saved chain
 ```
 
 What comes back: `markdown` (what ran, what it proved), `stopReason` (`completed` or `deferred`),
@@ -75,45 +72,40 @@ Choices worth knowing:
 | `list` | — | show saved graphs and how often each was used |
 | `maxSteps` | `20` | hard cap on executed nodes |
 
-## Use boundary substitution (opt-in)
+## Let the model find the chain itself
 
-Turn it on per profile — a listener here replaces a whole model turn, so it never turns itself on:
+You do not register phrases and you do not have to remember commands. A saved chain states what it
+is for, and the request you write in your own words is matched against that:
 
-```yaml
-- id: harnessmm
-  name: '@local/harnessmm'
-  config:
-    substitution:
-      enabled: true
-      decisionsPath: /tmp/decisions.json   # default: ~/.harnessmm/decisions.json
-      maxPerSession: 5
+```
+harnessmm_chain { solve: "прогони тесты и замер для пакета", rootId: "s1" }
 ```
 
-Register the decisions the model should stop re-deriving:
+That is the model's job to issue — you just ask for the work. What you may want to do by hand is
+*have* a library worth matching, which means saving chains with an `intent`:
 
 ```json
-{"decisions": [
-  {"id": "run-project-task",
-   "fingerprint": "e1dc1d6d7bdf275b",
-   "tool": "bash",
-   "arguments": {"description": "run the project task", "command": "make check"}}
-]}
+{"graph": {...}, "save": true, "name": "verify-package",
+ "intent": "проверить пакет: тесты и замер",
+ "description": "test suite, then the lab benchmark", "rootId": "s1"}
 ```
 
-The fingerprint is `sha256` of the normalized text of the last message a person wrote, truncated to
-16 hex characters — runtime context appended by the loop does not count. Compute it with
-`fingerprintRequest(options)` from [lib/substitution.js](../lib/substitution.js).
+`intent` is the only registration this plugin has. A chain saved without it runs by name and is
+never suggested — that is intentional, not an oversight.
 
-It refuses — and passes straight through to the model — when the policy is off, the call is internal
-(`session-title`, `compaction`), nothing matches, the decision is malformed, that decision was already
-spent in this session, or `maxPerSession` is reached. A decision is spent once per session by design:
-the original request stays in the conversation, so a second match would substitute forever.
+Matching rules worth knowing:
+
+- Words are stemmed and stopwords dropped, so `тесты`, `тест` and `тестов` are one term, and
+  `проверь`/`посмотри`/`сделай` are ignored as ways of asking rather than things asked for.
+- A chain's `intent` must therefore describe **what it does**, not how someone phrases the request.
+- Coverage decides: one shared vague word cannot claim a chain. A request that asks for the chain's
+  work plus three other things still matches.
 
 ## Check what actually happened
 
 Every call appends one line to `~/.harnessmm/usage/usage.jsonl` (override `HARNESSMM_USAGE_DIR`):
-tool, stop reason, certificates, executor, per-node timings, defer reasons, substitutions, and the
-caller's `session`. Saved graphs live in `~/.harnessmm/graphs`, decisions in `~/.harnessmm/decisions.json`.
+tool, stop reason, certificates, executor, per-node timings, defer reasons, and the
+caller's `session`. Saved graphs live in `~/.harnessmm/graphs`.
 
 ```
 node --test test/*.test.mjs          # 68 tests

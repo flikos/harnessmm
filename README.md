@@ -109,87 +109,72 @@ The agent skill lives in [skills/harnessmm/SKILL.md](skills/harnessmm/SKILL.md) 
 `~/.agents/skills/harnessmm/`): triggers (≥3 mechanical steps with observable gates), anti-triggers
 (exploration, content-branching, <3 steps), guard rules and stop conditions.
 
-## Boundary substitution (opt-in, off by default)
+## How a chain gets used without anyone registering phrases
 
-A chain substitutes *inside* one tool call. Boundary substitution replaces the model call that
-decides the tool call: when the incoming request is one a stored decision already covers, the
-plugin answers `llm/stream` with that decision's tool call, and the loop executes it as if the model
-had chosen it.
+Understanding a request is the model's job, so the plugin does not carry a phrase registry. What a
+library saves is the *plan*: once a sequence of mechanical steps with observable gates exists,
+re-deriving it costs a reasoning call at every step.
 
-It is off unless a profile enables it, because a listener here replaces a whole model turn:
-
-```yaml
-- id: harnessmm
-  name: '@local/harnessmm'
-  config:
-    substitution:
-      enabled: true
-      decisionsPath: /tmp/decisions.json   # default ~/.harnessmm/decisions.json
-      maxPerSession: 5
-```
+A saved chain declares what it is **for**:
 
 ```json
-{"decisions": [
-  {"id": "run-project-task",
-   "fingerprint": "e1dc1d6d7bdf275b",
-   "tool": "bash",
-   "arguments": {"description": "run the project task", "command": "make check"}}
-]}
+{"name": "verify-package",
+ "intent": "проверить пакет: тесты и замер",
+ "description": "test suite, then the lab benchmark"}
 ```
 
-The fingerprint is `sha256(normalized authored request)` truncated to 16 hex characters, where the
-authored request is the last user message a person wrote — the loop appends runtime context as
-further user messages, so the last user message is not the turn. Compute it with
-`fingerprintRequest(options)` from [lib/substitution.js](lib/substitution.js).
+Later, the model passes the request in the person's own words:
 
-Refusal is the default. The listener passes straight through when: the policy is disabled; the call
-is internal (`purpose` is `session-title` or `compaction`); no decision matches the fingerprint; the
-decision is malformed (no tool, unparseable arguments); the decision was already spent in this
-session; or the per-session cap is reached. A decision is spent once per session on purpose — the
-authored request stays in the conversation after the synthesized call runs, so a second match on the
-follow-up request would substitute the same decision forever.
-
-**Measured delta, equal conditions** (isolated profile, stub model that really decides to call a
-tool, same prompt both arms):
-
-| arm | model calls | tool ran | final answer |
-| --- | --- | --- | --- |
-| substitution disabled | 3 | yes | `ANSWER-AFTER-TOOL` |
-| substitution enabled | 2 | yes | `ANSWER-AFTER-TOOL` |
-
-One model call removed per substituted decision — the call that existed only to choose the tool.
-This is a counted difference, not a token estimate. It does not remove the call that interprets the
-tool result, and it says nothing about how often a real conversation matches a stored decision.
-
-To reproduce, point the run at its own ledger, or the measurement lands in the live one:
-
-```bash
-HARNESSMM_HOME=/tmp/poc/hm HARNESSMM_USAGE_DIR=/tmp/poc/hm/usage \
-  dsh --profile poc "Run the project task [[RUN-TOOL]]"
 ```
+harnessmm_chain { solve: "прогони тесты и замер для пакета", rootId: "s1" }
+```
+
+The library scores saved chains by how much of their declared intent the request actually talks
+about — stemmed, stopword-free tokens, so `тесты`/`тест`/`тестов` are one term. Coverage is the bar
+that a shared vague word cannot clear; precision is deliberately *not* a bar, because a person who
+asks for the verification plus three other things still wants the verification. A miss returns what
+exists, and the model authors a graph instead.
+
+There is no interception in this path: the chain reports receipts, and the model reads them.
+
+**Measured on the live library** (the seeded `verify-package` chain, `intent: "проверить пакет:
+тесты и замер"`):
+
+| request | result |
+| --- | --- |
+| `прогони тесты и замер для пакета` | match, score 1.0 |
+| `проверить пакет полностью, прогони тесты и сделай замер, потом покажи сводку…` | match, score 1.0 |
+| `проверь пакет` | match, score 0.23 |
+| `Проверь плагин. Посмотри, что реализовано и как это можно улучшить?` | no match |
+| `Переведи этот текст на английский` | no match |
+| `Перепиши этот модуль на TypeScript` | no match |
+
+The first row is the point: the sentence that defeated phrase registration — a natural request
+starting with a remembered phrase, followed by a real question — no longer has to match exactly.
+The last two rows are the other half: a request that shares nothing is not captured, even though
+`плагин` appears in a description.
 
 ## The honest boundary
 
-1. **Chains do not rewrite the agent loop; boundary substitution does, and it is opt-in.** Inside a
-   `harnessmm_chain` call the granularity is "tool call": the model still authors the graph and reads
-   the result. The `llm/stream` listener described above replaces a reasoning step outright — which
-   is why it ships disabled, must be turned on per profile, and passes every unmatched or malformed
-   case back to the model.
-2. **Boundary-level substitution in DSH is possible, and measured here without vendoring.**
-   `llm.stream()` and `preparedCall.stream()` both dispatch through the `llm/stream` waterfall, as
-   [DSH-Extensions-list/dsh-harnessmm](https://github.com/DSH-Extensions-list/dsh-harnessmm) does
-   with the authors' vendored controller. Two constraints the measurements exposed: one turn is more
-   than one model call (the request and `purpose: 'session-title'`), so an interceptor must select by
-   `purpose`; and the loop appends runtime context *after* the user message, so matching must use the
-   authored turn, not the last message. Earlier revisions of this README claimed a plugin *cannot*
-   remove a live model callback; that was wrong.
-3. **A stored decision is a curated asset, not an inference.** Substitution matches a fingerprint
-   computed from the request text, so it fires only where someone registered a decision. How often
-   that happens in real work is unmeasured: the count in the table is a controlled comparison, not
-   an adoption number.
-4. **Guards prove their own condition, not correctness.** `exit_code(compile) == 0` proves the
+1. **This plugin does not rewrite the agent loop.** Substitution happens in one explicit tool call:
+   the model asks for a chain with `solve`, or authors one. The model still reads the receipts and
+   writes the answer.
+2. **The mechanism can remove a live model call, and this plugin deliberately does not ship that.**
+   A `llm/stream` listener can answer a turn without the adapter ever being entered — measured, both
+   entry points (`llm.stream`, `preparedCall.stream`), with the adapter's own call counter as
+   negative evidence. An earlier revision shipped exactly that as phrase-keyed substitution and an
+   earlier revision still claimed the opposite was impossible; both were wrong, in opposite
+   directions.
+3. **A stored chain is a curated asset, not an inference.** `solve` matches declared intents, so it
+   fires only where someone saved a chain and said what it is for. How often that happens in real
+   work is unmeasured; the table above is a matrix of wordings, not an adoption number.
+4. **Why phrase registration was removed.** Matching a request against registered *phrases* puts the
+   meaning where there is none — in a config file, keyed to wording a person must predict. The first
+   live test failed exactly as designed: a natural sentence beginning with the registered phrase did
+   not match it. The model reads meaning; the library is matched against what a chain *does*.
+5. **Guards prove their own condition, not correctness.** `exit_code(compile) == 0` proves the
    build succeeded, not that the program is right.
-5. **Benchmark token numbers are `characters / 4` estimates** over exact prompt strings, from a
+6. **Benchmark token numbers are `characters / 4` estimates** over exact prompt strings, from a
    scripted actor — not tokenizer counts, not model quality claims.
 
 ## Related implementations
@@ -197,7 +182,7 @@ HARNESSMM_HOME=/tmp/poc/hm HARNESSMM_USAGE_DIR=/tmp/poc/hm/usage \
 | | [jlon/pi-harnessmm](https://github.com/jlon/pi-harnessmm) | [DSH-Extensions-list/dsh-harnessmm](https://github.com/DSH-Extensions-list/dsh-harnessmm) | this repo |
 | --- | --- | --- | --- |
 | platform | pi | DSH | DSH |
-| mechanism | controller inside the root terminal call | `llm/stream` interception, authors' vendored code (7.8 MB, pinned rev) + Python RSI | explicit chain tool plus opt-in `llm/stream` substitution from a stored-decision match, own implementation |
+| mechanism | controller inside the root terminal call | `llm/stream` interception, authors' vendored code (7.8 MB, pinned rev) + Python RSI | explicit chain tool with intent-matched saved chains (`solve`); `llm/stream` substitution proven but not shipped |
 | graph contract | authors' `<CHISEL_PLAN>`, parity-tested against the reference | authors' schema, vendored | own EDG schema (incompatible with `<CHISEL_PLAN>`) |
 | adopted from them | — | — | three-valued guard verdicts, `required_receipt_fields`, env scrubbing, substitutions-not-counterfactuals accounting |
 

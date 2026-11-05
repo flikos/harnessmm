@@ -7,15 +7,8 @@ import { runBenchmark, renderMarkdown, writeReport } from './lib/report.js'
 import { logUsage } from './lib/usage.js'
 import { runChain, makeExecutor, makeSandboxExecutor, renderChain } from './lib/chain.js'
 import { saveGraph, loadGraph, listGraphs, isValidName } from './lib/library.js'
+import { findReusableChain } from './lib/match.js'
 import { summarizeUsage } from './lib/usage.js'
-import {
-  commitSubstitution,
-  createSubstitutionState,
-  decideSubstitution,
-  decisionsFile,
-  readDecisions,
-  synthesizedChunks,
-} from './lib/substitution.js'
 
 /**
  * HarnessMM Lab: three tools.
@@ -24,10 +17,10 @@ import {
  *  - harnessmm_bench runs the same task set through the baseline and the
  *    guarded-reuse arm and returns measured token accounting.
  *  - harnessmm_chain executes a saved or inline graph and reports receipts.
- * The tools never touch this session's model loop; boundary substitution rides
- * on the `llm/stream` waterfall and is wired only when a profile enables it
- * (`wireSubstitution`). See docs/quickstart.md for the opt-in and its measured
- * effect.
+ * The tools never touch this session's model loop. Understanding a request is
+ * the model's job: a chain is suggested by `solve`, which matches a request
+ * against what saved graphs declare they are for — no phrase registry, no
+ * interception. See docs/quickstart.md.
  */
 export const inject = ['tools']
 
@@ -195,10 +188,12 @@ function renderList() {
   if (graphs.length === 0) {
     lines.push('No saved graphs. Author one and pass `save: true` with a `name`.')
   } else {
-    lines.push('| name | nodes | saved | description |')
-    lines.push('| --- | --- | --- | --- |')
+    lines.push('| name | nodes | saved | intent | description |')
+    lines.push('| --- | --- | --- | --- | --- |')
     for (const graph of graphs) {
-      lines.push(`| ${graph.name} | ${graph.nodes} | ${graph.savedAt ?? '—'} | ${graph.description || '—'} |`)
+      lines.push(
+        `| ${graph.name} | ${graph.nodes} | ${graph.savedAt ?? '—'} | ${graph.intent || '— (not suggestible)'} | ${graph.description || '—'} |`,
+      )
     }
   }
   lines.push('')
@@ -250,6 +245,16 @@ function makeChainTool(ctx) {
         save: {
           description: 'Validate and store `graph` under `name` instead of running it.',
           type: 'boolean',
+        },
+        solve: {
+          description:
+            'Natural-language request, e.g. "прогони проверки проекта" or "deploy the staging build". When `graph` and `name` are omitted, saved chains are matched against it by declared intent (never by exact phrasing) and the best match runs. A miss returns what was considered, so the chain can be authored instead.',
+          type: 'string',
+        },
+        intent: {
+          description:
+            'With `save: true`: what this chain is for, in a person\'s words ("проверить пакет: тесты и замер"). This is how a later `solve` finds it. A chain saved without intent can only be run by name.',
+          type: 'string',
         },
         description: {
           description: 'One line describing a saved graph.',
@@ -315,9 +320,9 @@ function makeChainTool(ctx) {
       if (args.save === true) {
         if (!args.name) throw new Error('save needs a name')
         if (!raw) throw new Error('save needs a graph')
-        const compiled = compileGraph(raw, {})
+        const compiled = compileGraph(raw, { rootId: args.rootId, priorIds: args.priorIds ?? [] })
         if (!compiled.ok) throw new Error(`graph refused: ${compiled.errors.join('; ')}`)
-        const saved = saveGraph(args.name, raw, { description: args.description ?? '' })
+        const saved = saveGraph(args.name, raw, { description: args.description ?? '', intent: args.intent ?? '' })
         logUsage({ tool: 'harnessmm_chain', ...attribution(exec), mode: 'save', name: args.name, nodes: compiled.graph.nodes.length, stamp: saved.stamp })
         return {
           markdown: `Saved graph "${args.name}" (${compiled.graph.nodes.length} nodes, stamp ${saved.stamp}) to ${saved.file}.\nRun it with harnessmm_chain { name: "${args.name}", allowShell: true }.`,
@@ -326,8 +331,37 @@ function makeChainTool(ctx) {
           certificates: 0,
         }
       }
+      if (!raw && !args.name && typeof args.solve === 'string') {
+        const match = findReusableChain(args.solve, listGraphs(), {
+          minCoverage: 0.6,
+          minPrecision: 0.25,
+        })
+        logUsage({
+          tool: 'harnessmm_chain',
+          ...attribution(exec),
+          mode: 'solve',
+          hit: match ? match.name : null,
+          score: match ? match.score : null,
+        })
+        if (match === null) {
+          const available = listGraphs()
+          return {
+            markdown: [
+              `No saved chain matched: ${JSON.stringify(args.solve)}`,
+              available.length === 0
+                ? 'The library is empty.'
+                : `Saved chains: ${available.map((entry) => `${entry.name}${entry.intent ? ` (intent: ${entry.intent})` : ''}`).join('; ')}`,
+              'Author the graph and pass it as `graph`, or save it with an `intent` so later requests find it.',
+            ].join('\n'),
+            stopReason: 'no-match',
+            steps: 0,
+            certificates: 0,
+          }
+        }
+        raw = loadGraph(match.name)
+      }
       if (!raw) {
-        if (!args.name) throw new Error('pass a graph, a saved name, or list: true')
+        if (!args.name) throw new Error('pass a graph, a saved name, solve, or list: true')
         raw = loadGraph(args.name)
       }
 
@@ -380,51 +414,8 @@ function makeChainTool(ctx) {
   }
 }
 
-/**
- * Wire boundary substitution into this session's model loop.
- *
- * Off unless the profile enables it: the listener replaces a whole model turn,
- * so it must never be an accident of installing the plugin. Every refusal —
- * internal call, unmatched request, exhausted budget, malformed decision — is a
- * plain `next()`, so the model answers exactly as before.
- */
-function wireSubstitution(ctx, config) {
-  const settings = config?.substitution ?? {}
-  if (settings.enabled !== true) return
-
-  const file = decisionsFile(settings)
-  const decisions = readDecisions(file)
-  if (decisions.length === 0) {
-    logUsage({ tool: 'llm/stream', mode: 'mount', enabled: true, decisions: 0, file })
-    return
-  }
-
-  const state = createSubstitutionState(decisions)
-  logUsage({ tool: 'llm/stream', mode: 'mount', enabled: true, decisions: decisions.length, file })
-
-  ctx.effect(() => ctx.on('llm/stream', async function* (options, next) {
-    const hit = decideSubstitution(options, { ...state, config: settings })
-    if (hit === null) {
-      yield* next()
-      return
-    }
-    commitSubstitution(state, hit)
-    logUsage({
-      tool: 'llm/stream',
-      mode: 'substitution',
-      session: shortSession(hit.session),
-      fingerprint: hit.fingerprint,
-      decision: hit.decision.id ?? null,
-      calls: hit.decision.tool,
-      purpose: options.purpose ?? null,
-    })
-    for (const chunk of synthesizedChunks(hit.decision)) yield chunk
-  }))
-}
-
 export function apply(ctx, config = {}) {
   ctx.effect(() => ctx.tools.register(validateTool))
   ctx.effect(() => ctx.tools.register(benchTool))
   ctx.effect(() => ctx.tools.register(makeChainTool(ctx)))
-  wireSubstitution(ctx, config)
 }
