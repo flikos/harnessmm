@@ -86,6 +86,6 @@ test('the report says the figure is a count, not an estimate of tokens or time',
   })
   const { renderChain } = await import('../lib/chain.js')
   const report = renderChain(result)
-  assert.match(report, /round-trip\(s\) skipped \(counted\)/i)
+  assert.match(report, /round-trip\(s\) skipped \(counted, upper bound\)/i)
   assert.doesNotMatch(report, /tokens|seconds/i, 'a count must not be dressed as an estimate')
 })

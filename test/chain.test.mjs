@@ -207,10 +207,9 @@ test('the result reports the round-trips the plan skipped, and nothing it would 
     execute: makeExecutor({ cwd, allowShell: true }),
   })
   assert.equal(result.avoidedRoundTrips, 1)
-  assert.equal(result.saved.avoidedCalls, 2)
-  assert.equal('estTokens' in result.saved, false, 'a token figure would be a model, not a measurement')
+  assert.equal('saved' in result, false, 'one savings figure only: a second field invites a second report')
   const report = renderChain(result)
-  assert.match(report, /1 model round-trip\(s\) skipped \(counted\)/)
+  assert.match(report, /1 model round-trip\(s\) skipped \(counted, upper bound\)/)
   assert.equal(report.includes('constant model'), false)
 })
 
@@ -348,4 +347,89 @@ test('the sandboxed extractor never renders output as [object Object]', async ()
   assert.match(result.steps[0].stdout, /block one/)
   assert.match(result.steps[0].stdout, /block two/)
   assert.equal(result.steps[0].stdout.includes('[object Object]'), false)
+})
+
+test('the selector parameter reaches the controller: priority resolves an ambiguous set', async () => {
+  const cwd = workspace()
+  const raw = graph([
+    { id: 'root', action: 'shell', args: { cmd: 'true' } },
+    { id: 'b', action: 'shell', args: { cmd: 'echo b' }, after: 'root', priority: 1,
+      guard: { op: 'exit_code', of: 'root', eq: 0 } },
+    { id: 'c', action: 'shell', args: { cmd: 'echo c' }, after: 'root', priority: 2,
+      guard: { op: 'exit_code', of: 'root', eq: 0 } },
+  ])
+  const unique = await runChain({ raw, cwd, execute: makeExecutor({ cwd, allowShell: true }) })
+  assert.equal(unique.stopReason, 'deferred')
+
+  const priority = await runChain({
+    raw, cwd, execute: makeExecutor({ cwd, allowShell: true }), selector: 'priority',
+  })
+  // Priority runs c (highest), then b becomes the only eligible node and runs too.
+  assert.equal(priority.stopReason, 'exhausted')
+  assert.deepEqual(priority.steps.map((step) => step.id), ['root', 'c', 'b'])
+
+  const abstain = await runChain({
+    raw, cwd, execute: makeExecutor({ cwd, allowShell: true }), selector: 'abstain',
+  })
+  assert.equal(abstain.stopReason, 'deferred')
+  // Explicit abstention defers every decision, even a single ready node.
+  assert.equal(abstain.steps.length, 0)
+})
+
+test('truncated output says so: the cut start is marked, not silent', async () => {
+  const cwd = workspace()
+  const result = await runChain({
+    raw: graph([{ id: 's1', action: 'shell', args: { cmd: 'python3 -c "print(\'x\' * 20000)"' } }]),
+    cwd,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  assert.equal(result.stopReason, 'exhausted')
+  assert.match(result.steps[0].stdout, /truncated \d+ char\(s\)/)
+  assert.ok(result.steps[0].stdout.length < 20_000 + 200)
+})
+
+test('the bash exit-code marker is a named, testable contract', async () => {
+  const { EXIT_CODE_MARKER } = await import('../lib/chain.js')
+  assert.equal(EXIT_CODE_MARKER.exec('[exit code: 3]')[1], '3')
+  assert.equal(EXIT_CODE_MARKER.exec('noise [exit code: -1] tail')[1], '-1')
+  assert.equal(EXIT_CODE_MARKER.test('no marker here'), false)
+})
+
+test('the environment scrub catches vendor prefixes and exact secret names', async () => {
+  const { scrubbedEnvironment } = await import('../lib/chain.js')
+  const env = scrubbedEnvironment({
+    PATH: '/usr/bin',
+    GITHUB_PAT: 'x',
+    GH_TOKEN: 'x',
+    ANTHROPIC_API_KEY: 'x',
+    AWS_SECRET_ACCESS_KEY: 'x',
+    PGPASS: 'x',
+    HOME: '/home/me',
+    TERM: 'xterm-256color',
+  })
+  assert.deepEqual(Object.keys(env).sort(), ['HOME', 'PATH', 'TERM'])
+})
+
+test('a write step over the size cap is refused, not truncated', async () => {
+  const cwd = workspace()
+  const result = await runChain({
+    raw: graph([{ id: 's1', action: 'write', args: { path: 'big.txt', content: 'x'.repeat(1_000_001) } }]),
+    cwd,
+    execute: makeExecutor({ cwd, allowShell: true }),
+  })
+  assert.equal(result.stopReason, 'execution-error')
+  assert.match(result.detail, /exceeds 1_?000_?000 characters|1[_,]?000[_,]?000 characters/)
+})
+
+test('a sandboxed chain refuses an action it does not know instead of running it direct', async () => {
+  const cwd = workspace()
+  const { calls, dispatch } = sandboxDispatch({ isError: false, value: { exitCode: 0 }, content: [] })
+  const result = await runChain({
+    raw: graph([{ id: 's1', action: 'http', args: { url: 'https://example.invalid' } }]),
+    cwd,
+    execute: makeSandboxExecutor({ dispatch, cwd }),
+  })
+  assert.equal(result.stopReason, 'execution-error')
+  assert.match(result.detail, /shell.*write|write.*shell/)
+  assert.equal(calls.length, 0)
 })

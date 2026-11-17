@@ -56,6 +56,9 @@ crossed, nothing about tokens or time.
 | `expectation-failed` | the previous step produced something else | the failing step's full output |
 | `evidence-unreadable` | the expected fact was not in the output | the step, and which fact was missing |
 | `execution-error` | the command could not run | the error |
+| `invalid-graph` | the plan failed validation; nothing executed | the list of validation errors |
+| `deferred` | several steps were ready and the selector could not pick one | the eligible step ids |
+| `max-steps` | the step cap was reached | how far it got |
 
 Steps after the stopping one do not run.
 
@@ -92,7 +95,9 @@ When the plan is not a straight line, pass `graph` instead:
 ] }
 ```
 
-Both forms compile to the same plan; a guard means the same thing either way.
+Both forms compile to the same plan; a guard means the same thing either way. If a node's id collides
+with the `rootId` receipt you passed, the node is renamed `<id>__shadowed` in the report — the root
+receipt keeps its name.
 
 ## Check what actually happened
 

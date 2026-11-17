@@ -32,7 +32,7 @@ function fakeContext() {
 test('the plugin registers its tools', () => {
   const ctx = fakeContext()
   apply(ctx)
-  assert.deepEqual([...ctx.defs.keys()].sort(), ['harnessmm_bench', 'harnessmm_chain', 'harnessmm_validate'])
+  assert.deepEqual([...ctx.defs.keys()].sort(), ['harnessmm_bench', 'harnessmm_chain', 'harnessmm_usage', 'harnessmm_validate'])
   for (const def of ctx.defs.values()) {
     assert.equal(typeof def.execute, 'function')
     assert.equal(def.parameters.type, 'object')
@@ -115,6 +115,29 @@ test('every tool call leaves a line in the usage ledger', async () => {
   assert.equal(lines[1].tool, 'harnessmm_bench')
   assert.equal(lines[1].skippedCallbacks, 2)
   assert.match(lines[0].at, /^\d{4}-\d{2}-\d{2}T/)
+  process.env.HARNESSMM_USAGE_DIR = TEST_USAGE_DIR
+})
+
+test('harnessmm_usage aggregates the ledger back', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harnessmm-usage-read-'))
+  process.env.HARNESSMM_USAGE_DIR = dir
+  const ctx = fakeContext()
+  apply(ctx)
+  await ctx.defs.get('harnessmm_validate').execute({
+    graph: { nodes: [{ id: 's1', action: 'shell', args: { cmd: 'ls' } }] },
+  })
+  const usage = ctx.defs.get('harnessmm_usage')
+  const value = await usage.execute({})
+  assert.equal(value.summary.byTool.harnessmm_validate.calls, 1)
+  // The summary is computed before the usage tool logs its own entry.
+  assert.ok(value.summary.entries >= 1)
+  assert.match(value.markdown, /harnessmm_validate/)
+  assert.match(value.markdown, /ledger:/)
+  const withEntries = await usage.execute({ entries: 2 })
+  assert.equal(withEntries.recent.length, 2)
+  assert.equal(withEntries.recent[0].tool, 'harnessmm_validate')
+  const rendered = usage.output.render({}, value)
+  assert.equal(rendered[0].type, 'text')
   process.env.HARNESSMM_USAGE_DIR = TEST_USAGE_DIR
 })
 

@@ -39,7 +39,7 @@ Expectations use one vocabulary in both forms: `exit_code`, `stdout_contains`, `
 `file_exists`, `file_contains`, `json_field` (with `field` plus `exists`/`eq`/`ne`), `exists`, and the
 combinators `all`, `any`, `not`.
 
-## The four ways a plan stops
+## The seven ways a plan stops
 
 | status | meaning | what the caller does |
 | --- | --- | --- |
@@ -47,13 +47,18 @@ combinators `all`, `any`, `not`.
 | `expectation-failed` | the world disagreed with the plan | read `failure`, which carries the failing step's full output |
 | `evidence-unreadable` | the expected fact was not in the output | do not guess |
 | `execution-error` | the command could not run | fix the invocation |
+| `invalid-graph` | the plan failed validation; nothing executed | fix the plan — the `detail` lists every error |
+| `deferred` | several nodes were ready and the selector could not pick one without a semantic judgement | decide between the eligible steps, or pass `selector: "priority"` |
+| `max-steps` | the hard cap on executed nodes was reached | split the plan |
 
-Nothing collapses into a generic "deferred". A stop names the step that caused it.
+Each stop names the step that caused it; `invalid-graph` is the one that names the plan itself.
 
 ## What it measures
 
-The claim is a **count**, not an estimate: `avoidedRoundTrips` is the number of model boundaries the
-plan crossed without a call — for a plan with N executed steps, N − 1. There is no token or time figure
+The claim is a **count, stated as an upper bound**: `avoidedRoundTrips` is the number of model
+boundaries the plan crossed without a call — for a plan with N executed steps, N − 1. It is an upper
+bound because an agent could in principle issue several tool calls in one reasoning turn; when that
+happens a step does not cost a round-trip. There is no token or time figure
 anywhere in the result: a number nobody measured would compete with the one that was.
 
 Measured on a live profile (the run recorded in this repository's history):
@@ -79,10 +84,15 @@ The counting itself is not done by the tool but by a wrapping executor in the te
   policy and its approvals apply. Prefer it.
 - `executor: "direct"` needs `allowShell: true`, runs in the Host process and is outside the bash
   sandbox: only for commands you trust.
-- A short deny list refuses destructive patterns in both modes. It is defence in depth, not a sandbox.
-- Spawned commands get a scrubbed environment: variables that look like credentials are removed.
+- A short deny list refuses destructive patterns in both modes. It is defence in depth, not a
+  sandbox: it catches typos and obvious mistakes, not concealment — `bash -c 'sudo …'`, base64
+  wrapping or rearranged arguments all pass it. The sandboxed executor is the real boundary.
+- Spawned commands get a scrubbed environment: variables with credential-like names or
+  well-known vendor prefixes (GH_, AWS_, AZURE_, …) are removed. Also a denylist, not a
+  guarantee: a secret under an innocent name still passes through.
 - A plan that fails validation executes nothing.
-- Every step has a timeout; the whole plan has a step cap.
+- Every step has a timeout; the whole plan has a step cap. Write steps are capped at one
+  million characters.
 
 ## The honest boundary
 
@@ -118,6 +128,10 @@ The counting itself is not done by the tool but by a wrapping executor in the te
 Every call appends one line to `~/.harnessmm/usage/usage.jsonl` (override with `HARNESSMM_USAGE_DIR`):
 status, step count, certificates, executor, per-step timings, the failing step, round-trips removed and
 the caller's session. Test runs use a throwaway ledger, never the live one.
+
+`harnessmm_usage` reads that ledger back: per-tool call counts, chain steps, certificates and wall
+time over a window, plus raw entries on request. The ledger is how adoption is measured instead of
+guessed — before deciding whether the plugin earns its place, look at what actually ran.
 
 `harnessmm_validate` checks a plan before anyone trusts it (literal closure, unknown predecessors,
 cycles, guards reading undeclared fields). `harnessmm_bench` is a measurement harness for the paper's

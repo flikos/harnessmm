@@ -42,7 +42,7 @@ Nothing is registered or saved. The plan is stated in the call, every time.
    obviously safe. `"direct"` needs `allowShell: true`, runs in the Host process,
    and is only for trusted mechanical commands. Destructive patterns are refused
    in both; `timeoutMs` per step is honoured.
-5. Read the result. Four statuses, each a different decision:
+5. Read the result. Seven statuses, each a different decision:
 
    | status | meaning | what to do |
    | --- | --- | --- |
@@ -50,6 +50,9 @@ Nothing is registered or saved. The plan is stated in the call, every time.
    | `expectation-failed` | the world disagreed | read `failure` — it carries the failing step's full output — and decide the recovery |
    | `evidence-unreadable` | the expected fact was not there | do not guess: the output was not what a guard can read |
    | `execution-error` | the command could not run | fix the invocation |
+   | `invalid-graph` | the plan failed validation; nothing ran | fix the plan from the listed errors |
+   | `deferred` | several nodes were ready and no selector could pick | pick between the eligible steps yourself, or pass `selector: "priority"` |
+   | `max-steps` | the step cap was reached | split the plan |
 
 ## Guard rules
 
@@ -64,8 +67,9 @@ Nothing is registered or saved. The plan is stated in the call, every time.
 ## What it is worth
 
 The result reports `avoidedRoundTrips`: model boundaries crossed without a call,
-counted, not estimated. A plan of N steps removes N − 1 round-trips when it runs
-to the end.
+counted, not estimated — an upper bound, because a single reasoning turn could
+have issued several tool calls. A plan of N steps removes N − 1 round-trips when
+it runs to the end.
 
 ## Stop conditions
 

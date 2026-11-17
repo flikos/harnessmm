@@ -4,18 +4,19 @@ import path from 'node:path'
 import { compileGraph } from './lib/graph.js'
 import { TASKS } from './lib/tasks.js'
 import { runBenchmark, renderMarkdown, writeReport } from './lib/report.js'
-import { logUsage } from './lib/usage.js'
+import { logUsage, readUsage, summarizeUsage, usageFile } from './lib/usage.js'
 import { runChain, makeExecutor, makeSandboxExecutor, renderChain } from './lib/chain.js'
 import { resolveMode } from './lib/modes.js'
-import { summarizeUsage } from './lib/usage.js'
 
 /**
- * HarnessMM Lab: three tools.
+ * HarnessMM Lab: four tools.
  *  - harnessmm_validate checks an Executable Decision Graph against literal
  *    closure and causal-dependency rules before anyone trusts it.
  *  - harnessmm_bench runs the same task set through the baseline and the
  *    guarded-reuse arm and returns measured token accounting.
- *  - harnessmm_chain executes a saved or inline graph and reports receipts.
+ *  - harnessmm_chain executes an inline graph and reports receipts.
+ *  - harnessmm_usage reads the append-only usage ledger so adoption is
+ *    measurable, not guessed.
  * The tools never touch this session's model loop. Understanding a request is
  * the model's job: it states the plan itself, in the call, as a list of steps
  * with their expectations. Nothing is registered in advance and nothing is
@@ -173,6 +174,62 @@ const benchTool = {
   },
 }
 
+const usageTool = {
+  name: 'harnessmm_usage',
+  description:
+    'Read the harnessmm usage ledger: per-tool call counts, chain steps, certificates, wall time and the most recent entries. The ledger is how adoption is measured instead of guessed; call this when deciding whether the plugin earns its place.',
+  parameters: {
+    type: 'object',
+    properties: {
+      window: {
+        description: 'How many most recent ledger entries to aggregate (default 200).',
+        type: 'number',
+      },
+      entries: {
+        description: 'Also return the raw most recent entries (default 0).',
+        type: 'number',
+      },
+    },
+    additionalProperties: false,
+  },
+  output: {
+    schema: {
+      type: 'object',
+      properties: {
+        markdown: { type: 'string' },
+        summary: { type: 'object' },
+      },
+      required: ['markdown', 'summary'],
+    },
+    render: (_args, value) => text(value.markdown),
+  },
+  async execute(args, exec) {
+    const window = Number.isFinite(args.window) && args.window > 0 ? Math.floor(args.window) : 200
+    const entryCount = Number.isFinite(args.entries) && args.entries > 0 ? Math.floor(args.entries) : 0
+    const summary = summarizeUsage(window)
+    const recent = entryCount > 0 ? readUsage().slice(-entryCount) : []
+    const lines = []
+    lines.push(`# harnessmm usage — ${summary.entries} entr${summary.entries === 1 ? 'y' : 'ies'} (window ${summary.window})`)
+    lines.push('')
+    lines.push('| tool | calls | last at |')
+    lines.push('| --- | --- | --- |')
+    for (const [tool, stats] of Object.entries(summary.byTool)) {
+      lines.push(`| ${tool} | ${stats.calls} | ${stats.lastAt ?? '—'} |`)
+    }
+    lines.push('')
+    lines.push(`chain steps: ${summary.chainSteps}, certificates: ${summary.certificates}, chain wall time: ${summary.chainMs} ms`)
+    lines.push(`ledger: ${usageFile()}`)
+    if (recent.length > 0) {
+      lines.push('')
+      lines.push('```json')
+      lines.push(JSON.stringify(recent, null, 2))
+      lines.push('```')
+    }
+    logUsage({ tool: 'harnessmm_usage', ...attribution(exec), window, entries: recent.length })
+    return { markdown: lines.join('\n'), summary, ...(recent.length > 0 ? { recent } : {}) }
+  },
+}
+
 async function resolveCwd(ctx, exec, explicit) {
   if (explicit) return path.resolve(explicit)
   const service = typeof ctx.get === 'function' ? ctx.get('workingDirectory') : undefined
@@ -227,6 +284,11 @@ function makeChainTool(ctx) {
           description: 'Hard cap on executed nodes (default 20).',
           type: 'number',
         },
+        selector: {
+          description: 'How to pick when several nodes are ready at once: "unique" (default) stops with deferred when the set is ambiguous; "priority" picks the highest-priority node; "abstain" always defers to the model.',
+          type: 'string',
+          enum: ['unique', 'priority', 'abstain'],
+        },
       },
       additionalProperties: false,
     },
@@ -271,6 +333,7 @@ function makeChainTool(ctx) {
         cwd,
         execute,
         maxSteps: args.maxSteps ?? 20,
+        selector: args.selector ?? 'unique',
       })
       const execMs = Date.now() - started
       logUsage({
@@ -288,7 +351,6 @@ function makeChainTool(ctx) {
         verdicts: (result.verdicts ?? []).map((reason) => ({ id: reason.id, state: reason.state })),
         failedStep: result.failedStep ?? null,
         avoidedRoundTrips: result.avoidedRoundTrips,
-
       })
       return {
         markdown: renderChain(result),
@@ -299,7 +361,6 @@ function makeChainTool(ctx) {
         verdicts: result.verdicts ?? [],
         failedStep: result.failedStep ?? null,
         avoidedRoundTrips: result.avoidedRoundTrips,
-        saved: result.saved,
       }
     },
   }
@@ -308,5 +369,6 @@ function makeChainTool(ctx) {
 export function apply(ctx, config = {}) {
   ctx.effect(() => ctx.tools.register(validateTool))
   ctx.effect(() => ctx.tools.register(benchTool))
+  ctx.effect(() => ctx.tools.register(usageTool))
   ctx.effect(() => ctx.tools.register(makeChainTool(ctx)))
 }
